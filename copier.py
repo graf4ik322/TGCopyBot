@@ -303,17 +303,27 @@ class TelegramCopier:
             try:
                 discussion_group = PeerChannel(discussion_group_id)
                 
-                # Получаем комментарии из discussion group с ограничением по количеству
+                # Получаем все комментарии из discussion group
                 comment_count = 0
-                max_comments_per_message = 100  # Ограничиваем количество комментариев на сообщение
                 
-                async for comment in self.client.iter_messages(
-                    discussion_group, 
-                    reply_to=message.id,
-                    limit=max_comments_per_message
-                ):
-                    comments.append(comment)
-                    comment_count += 1
+                # Добавляем тайм-аут для предотвращения зависания на одном сообщении
+                try:
+                    async for comment in self.client.iter_messages(
+                        discussion_group, 
+                        reply_to=message.id,
+                        limit=None
+                    ):
+                        comments.append(comment)
+                        comment_count += 1
+                        
+                        # Логируем прогресс для сообщений с большим количеством комментариев
+                        if comment_count % 500 == 0:
+                            self.logger.debug(f"   📥 Сообщение {message.id}: собрано {comment_count} комментариев...")
+                            
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"Тайм-аут при сборе комментариев для сообщения {message.id} (собрано {comment_count})")
+                except Exception as iter_error:
+                    self.logger.warning(f"Ошибка при итерации комментариев для сообщения {message.id}: {iter_error}")
                     
                 if comment_count > 0:
                     self.logger.info(f"💬 Сообщение {message.id}: собрано {comment_count} комментариев из discussion group {discussion_group_id}")
@@ -439,13 +449,9 @@ class TelegramCopier:
                 messages_processed = 0
                 messages_with_comments = 0
                 
-                # Ограничиваем количество сообщений для проверки комментариев (для предотвращения зависания)
-                max_messages_to_check = 1000
-                messages_to_check = all_messages[:max_messages_to_check] if len(all_messages) > max_messages_to_check else all_messages[:]
+                self.logger.info(f"📊 Проверяем комментарии для всех {len(all_messages)} сообщений")
                 
-                self.logger.info(f"📊 Проверяем комментарии для {len(messages_to_check)} сообщений из {len(all_messages)}")
-                
-                for message in messages_to_check:
+                for message in all_messages[:]:
                     messages_processed += 1
                     
                     # Быстрая предварительная проверка наличия replies
@@ -455,9 +461,9 @@ class TelegramCopier:
                     if not hasattr(message.replies, 'comments') or not message.replies.comments:
                         continue
                         
-                    # Логируем прогресс каждые 100 сообщений
-                    if messages_processed % 100 == 0:
-                        self.logger.info(f"🔍 Проверено сообщений: {messages_processed}/{len(messages_to_check)}, найдено комментариев: {comments_collected}")
+                    # Логируем прогресс каждые 50 сообщений для лучшего контроля
+                    if messages_processed % 50 == 0:
+                        self.logger.info(f"🔍 Проверено сообщений: {messages_processed}/{len(all_messages)}, найдено комментариев: {comments_collected}")
                     
                     comments = await self.get_comments_for_message(message)
                     if comments:
