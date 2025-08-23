@@ -43,6 +43,9 @@ class Config:
         self.tracker_file: str = os.getenv("TRACKER_FILE", "copied_messages.json")
         self.add_debug_tags: bool = os.getenv("ADD_DEBUG_TAGS", "false").lower() == "true"
         
+        # НОВОЕ: Настройка антивложенности
+        self.flatten_structure = self._get_bool('FLATTEN_STRUCTURE', False)
+        
         # Proxy settings (optional)
         self.proxy_server: Optional[str] = os.getenv('PROXY_SERVER')
         # ИСПРАВЛЕНИЕ: Безопасное преобразование PROXY_PORT

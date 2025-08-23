@@ -349,7 +349,8 @@ class TelegramCopierApp:
                 resume_file=self.config.resume_file,
                 use_message_tracker=getattr(self.config, 'use_message_tracker', True),
                 tracker_file=getattr(self.config, 'tracker_file', 'copied_messages.json'),
-                add_debug_tags=getattr(self.config, 'add_debug_tags', False)
+                add_debug_tags=getattr(self.config, 'add_debug_tags', False),
+                flatten_structure=getattr(self.config, 'flatten_structure', False)
             )
             
             # Проверяем, нужно ли возобновить с определенного места
