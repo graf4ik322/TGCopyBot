@@ -307,10 +307,7 @@ class TelegramCopier:
         min_id = resume_from_id if resume_from_id else 0
         
         try:
-            # ВЫБОР РЕЖИМА: Вложенная или плоская структура
-            if self.flatten_structure:
-                # Переключаемся на режим антивложенности
-                return await self.copy_all_messages_flattened(resume_from_id)
+            # Режим определяется флагом self.flatten_structure в основной логике ниже
             
             # НОВАЯ АРХИТЕКТУРА: Потоковая обработка с соблюдением хронологии
             self.logger.info("🔄 Начинаем хронологическую обработку сообщений")
@@ -349,34 +346,32 @@ class TelegramCopier:
             progress_tracker = ProgressTracker(total_messages)
             message_count = 0
             
-            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Обрабатываем сообщения в строгом хронологическом порядке
-            # Больше никаких разделений на альбомы и одиночные сообщения!
+            # ПРОСТАЯ РАБОЧАЯ ЛОГИКА: Обрабатываем каждое сообщение при получении
             pending_album_messages = {}  # grouped_id -> список сообщений альбома
             
             async for message in self.client.iter_messages(**iter_params):
                 message_count += 1
                 
-                # НОВОЕ: Проверка дедупликации
+                # Проверка дедупликации
                 if self.deduplicator.is_message_processed(message):
                     self.logger.debug(f"Сообщение {message.id} уже было обработано ранее, пропускаем")
                     self.skipped_messages += 1
                     continue
                 
-                # НОВАЯ ЛОГИКА: Обрабатываем каждое сообщение в хронологическом порядке
                 try:
-                    # Обрабатываем основное сообщение (альбом или одиночное)
+                    # ОБРАБАТЫВАЕМ СООБЩЕНИЕ СРАЗУ (как в оригинале, но улучшенно)
                     success = await self._process_message_chronologically(
                         message, pending_album_messages, progress_tracker
                     )
                     
                     if success:
-                        # ВАЖНО: После успешной обработки основного сообщения
-                        # обрабатываем ВСЕ его комментарии в хронологическом порядке
-                        await self._process_message_comments(message, progress_tracker)
+                        # НОВОЕ: Добавляем обработку комментариев (если не режим антивложенности)
+                        if not self.flatten_structure:
+                            await self._process_message_comments(message, progress_tracker)
                         
-                        # Записываем ID только после полной обработки сообщения и комментариев
+                        # Записываем ID только после полной обработки
                         save_last_message_id(message.id, self.resume_file)
-                        self.logger.debug(f"✅ Полностью обработано сообщение {message.id} с комментариями")
+                        self.logger.debug(f"✅ Сообщение {message.id} полностью обработано")
                     
                 except FloodWaitError as e:
                     await handle_flood_wait(e, self.logger)
@@ -430,210 +425,6 @@ class TelegramCopier:
                         f"Ошибок: {self.failed_messages}, Пропущено: {self.skipped_messages}")
         
         return final_stats
-    
-    async def copy_all_messages_flattened(self, resume_from_id: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Копирование всех сообщений в режиме антивложенности (плоская структура).
-        Превращает вложенную структуру (посты -> комментарии) в линейную последовательность.
-        
-        Args:
-            resume_from_id: ID сообщения для возобновления с определенного места
-        
-        Returns:
-            Словарь со статистикой копирования
-        """
-        # НЕ вызываем initialize() здесь - он уже был вызван в copy_all_messages()
-        
-        # Инициализируем трекер с информацией о каналах
-        if self.message_tracker:
-            self.message_tracker.set_channels(
-                str(self.source_group_id), 
-                str(self.target_group_id)
-            )
-        
-        # Получаем общее количество сообщений
-        total_messages = await self.get_total_messages_count()
-        if total_messages == 0:
-            self.logger.warning("В исходной группе/канале нет сообщений")
-            return {'total_messages': 0, 'copied_messages': 0}
-        
-        self.logger.info(f"🔄 Начинаем копирование {total_messages} сообщений в режиме антивложенности")
-        self.logger.info("📋 Все комментарии будут превращены в обычные посты в хронологическом порядке")
-        self.logger.info("⚡ Режим антивложенности: обычные сообщения БЕЗ комментариев")
-        
-        progress_tracker = ProgressTracker(total_messages)
-        
-        # Определяем начальную позицию
-        if self.message_tracker and not resume_from_id:
-            last_copied_id = self.message_tracker.get_last_copied_id()
-            if last_copied_id:
-                resume_from_id = last_copied_id
-                self.logger.info(f"📊 Трекер: последний скопированный ID {last_copied_id}")
-        
-        min_id = resume_from_id if resume_from_id else 0
-        
-        try:
-            # ПРОСТАЯ ЛОГИКА: Собираем ВСЕ сообщения в хронологическом порядке
-            self.logger.info("🔍 Собираем все сообщения из канала в хронологическом порядке...")
-            
-            # Определяем параметры для iter_messages
-            iter_params = {
-                'entity': self.source_entity,
-                'reverse': True,  # От старых к новым
-                'limit': None     # Все сообщения
-            }
-            
-            # Если возобновляем работу
-            if min_id:
-                self.logger.info(f"Возобновление работы с сообщения ID: {min_id}")
-                
-                # Проверяем наличие новых сообщений
-                has_new_messages = False
-                async for test_message in self.client.iter_messages(self.source_entity, min_id=min_id, limit=1):
-                    has_new_messages = True
-                    break
-                
-                if not has_new_messages:
-                    self.logger.info(f"🎯 Новых сообщений после ID {min_id} не найдено. Копирование актуально.")
-                    return {
-                        'total_messages': total_messages,
-                        'copied_messages': 0,
-                        'failed_messages': 0,
-                        'skipped_messages': 0,
-                        'status': 'up_to_date',
-                        'message': f'Все сообщения до ID {min_id} уже скопированы'
-                    }
-                
-                iter_params['min_id'] = min_id
-            
-            # ПРОСТОЙ ПОТОКОВЫЙ РЕЖИМ: Используем iter_messages но БЕЗ обработки комментариев
-            self.logger.info("🔄 Используем iter_messages в потоковом режиме (без комментариев)")
-            
-            # Определяем параметры для iter_messages (как в обычном режиме)
-            iter_params = {
-                'entity': self.source_entity,
-                'reverse': True,  # От старых к новым
-                'limit': None     # Все сообщения
-            }
-            
-            if min_id:
-                iter_params['min_id'] = min_id
-            
-            # Обрабатываем сообщения потоково БЕЗ загрузки комментариев
-            pending_albums = {}
-            message_count = 0
-            
-            async for message in self.client.iter_messages(**iter_params):
-                message_count += 1
-                
-                # Проверка дедупликации
-                if self.deduplicator.is_message_processed(message):
-                    self.logger.debug(f"Сообщение {message.id} уже было обработано ранее, пропускаем")
-                    self.skipped_messages += 1
-                    continue
-                
-                try:
-                    # КЛЮЧЕВОЕ ОТЛИЧИЕ: Обрабатываем только основное сообщение, БЕЗ комментариев
-                    success = await self._process_message_chronologically(
-                        message, pending_albums, progress_tracker
-                    )
-                    
-                    if success:
-                        # НЕ обрабатываем комментарии - это главное отличие от обычного режима
-                        save_last_message_id(message.id, self.resume_file)
-                        self.logger.debug(f"✅ Сообщение {message.id} обработано в плоском режиме")
-                        
-                        # Соблюдаем лимиты скорости
-                        if not self.dry_run:
-                            await self.rate_limiter.wait_if_needed()
-                            self.rate_limiter.record_message_sent()
-                    
-                    # Показываем прогресс
-                    if message_count % 100 == 0:
-                        self.logger.info(f"📊 Прогресс: {message_count} сообщений обработано в плоском режиме")
-                    
-                except FloodWaitError as e:
-                    await handle_flood_wait(e, self.logger)
-                    # Повторяем попытку
-                    success = await self._process_message_chronologically(
-                        message, pending_albums, progress_tracker
-                    )
-                    if success:
-                        save_last_message_id(message.id, self.resume_file)
-                        if not self.dry_run:
-                            self.rate_limiter.record_message_sent()
-                    
-                except (PeerFloodError, MediaInvalidError) as e:
-                    self.logger.warning(f"Telegram API ошибка для сообщения {message.id}: {e}")
-                    self.failed_messages += 1
-                    progress_tracker.update(False)
-                    
-                except Exception as e:
-                    self.logger.error(f"Неожиданная ошибка обработки сообщения {message.id}: {type(e).__name__}: {e}")
-                    self.failed_messages += 1
-                    progress_tracker.update(False)
-            
-            # Завершаем оставшиеся альбомы
-            await self._finalize_pending_albums(pending_albums, progress_tracker)
-            
-            self.logger.info(f"✅ Обработано {message_count} сообщений в плоском режиме (антивложенность)")
-        
-        except Exception as e:
-            self.logger.error(f"Критическая ошибка при плоском копировании: {e}")
-            return {'error': str(e)}
-        
-        # Получаем финальную статистику
-        final_stats = progress_tracker.get_final_stats()
-        final_stats.update({
-            'copied_messages': self.copied_messages,
-            'failed_messages': self.failed_messages,
-            'skipped_messages': self.skipped_messages,
-            'mode': 'flattened'
-        })
-        
-        # Проверяем реальное количество сообщений в целевом канале
-        if self.copied_messages > 0 and not self.dry_run:
-            try:
-                target_count = await self.get_target_messages_count()
-                final_stats['target_messages_count'] = target_count
-                self.logger.info(f"🔍 Проверка: в целевом канале {target_count} сообщений")
-            except Exception as e:
-                self.logger.warning(f"Не удалось проверить целевой канал: {e}")
-        
-        self.logger.info(f"📊 Плоское копирование завершено. Скопировано: {self.copied_messages}, "
-                        f"Ошибок: {self.failed_messages}, Пропущено: {self.skipped_messages}")
-        
-        return final_stats
-    
-    async def _collect_all_messages_recursively(self, entity, messages_list: List[Message], 
-                                               parent_id: Optional[int] = None) -> None:
-        """
-        Рекурсивно собирает все сообщения и комментарии в один плоский список.
-        
-        Args:
-            entity: Сущность канала/группы
-            messages_list: Список для сохранения сообщений
-            parent_id: ID родительского сообщения (для комментариев)
-        """
-        try:
-            if parent_id is None:
-                # Собираем основные сообщения
-                async for message in self.client.iter_messages(entity, reverse=True, limit=None):
-                    messages_list.append(message)
-                    # Рекурсивно собираем комментарии к этому сообщению
-                    await self._collect_all_messages_recursively(entity, messages_list, message.id)
-            else:
-                # Собираем комментарии к определенному сообщению
-                async for comment in self.client.iter_messages(entity, reply_to=parent_id, reverse=True, limit=None):
-                    messages_list.append(comment)
-                    # Рекурсивно собираем комментарии к комментарию
-                    await self._collect_all_messages_recursively(entity, messages_list, comment.id)
-                    
-        except Exception as e:
-            if parent_id:
-                self.logger.debug(f"Не удалось получить комментарии к сообщению {parent_id}: {e}")
-            else:
-                self.logger.error(f"Ошибка сбора сообщений: {e}")
     
     async def _process_message_chronologically(self, message: Message, 
                                             pending_album_messages: Dict[int, List[Message]],
