@@ -15,7 +15,7 @@ from telethon.tl.types import (
     MessageEntityHashtag, MessageEntityBold, MessageEntityItalic,
     MessageEntityCode, MessageEntityPre, MessageEntityStrike,
     MessageEntityUnderline, MessageEntitySpoiler, MessageEntityBlockquote,
-    ChannelParticipantAdmin, ChannelParticipantCreator
+    ChannelParticipantAdmin, ChannelParticipantCreator, PeerChannel
 )
 from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
 from telethon.tl import functions
@@ -266,6 +266,46 @@ class TelegramCopier:
             # В случае ошибки возвращаем приблизительную оценку
             return 10000  # Достаточно большое число для прогресс-бара
     
+    async def get_comments_for_message(self, message: Message) -> List[Message]:
+        """
+        Получает комментарии для сообщения из канала через discussion group.
+        
+        Args:
+            message: Сообщение из канала, для которого нужно получить комментарии
+            
+        Returns:
+            Список сообщений-комментариев
+        """
+        comments = []
+        
+        try:
+            # Проверяем, есть ли у сообщения информация о комментариях
+            if not hasattr(message, 'replies') or not message.replies:
+                return comments
+                
+            # Проверяем, включены ли комментарии и есть ли связанная группа
+            if not (message.replies.comments and hasattr(message.replies, 'channel_id') and message.replies.channel_id):
+                return comments
+                
+            # Получаем discussion group
+            discussion_group_id = message.replies.channel_id
+            discussion_group = PeerChannel(discussion_group_id)
+            
+            # Получаем комментарии из discussion group
+            async for comment in self.client.iter_messages(
+                discussion_group, 
+                reply_to=message.id,
+                limit=None
+            ):
+                comments.append(comment)
+                
+            self.logger.debug(f"Найдено {len(comments)} комментариев для сообщения {message.id}")
+            
+        except Exception as e:
+            self.logger.debug(f"Не удалось получить комментарии для сообщения {message.id}: {e}")
+            
+        return comments
+    
     async def copy_all_messages(self, resume_from_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Копирование всех сообщений из исходной группы/канала в целевую группу/канал.
@@ -368,7 +408,34 @@ class TelegramCopier:
                 if len(all_messages) % 1000 == 0:
                     self.logger.info(f"Собрано {len(all_messages)} сообщений для обработки...")
             
-            self.logger.info(f"Всего собрано {len(all_messages)} сообщений, начинаем группировку")
+            self.logger.info(f"Всего собрано {len(all_messages)} основных сообщений")
+            
+            # ЭТАП 1.5: Собираем комментарии для каждого сообщения (если включен режим антивложенности)
+            if self.flatten_structure:
+                self.logger.info("🔄 Сбор комментариев из discussion groups...")
+                comments_collected = 0
+                
+                for message in all_messages[:]:  # Копируем список для безопасной модификации
+                    comments = await self.get_comments_for_message(message)
+                    if comments:
+                        # Помечаем комментарии специальным атрибутом для последующей идентификации
+                        for comment in comments:
+                            comment._is_from_discussion_group = True
+                            comment._parent_message_id = message.id
+                        
+                        # Добавляем комментарии к общему списку сообщений
+                        all_messages.extend(comments)
+                        comments_collected += len(comments)
+                        
+                        if comments_collected % 100 == 0 and comments_collected > 0:
+                            self.logger.info(f"Собрано {comments_collected} комментариев...")
+                
+                if comments_collected > 0:
+                    self.logger.info(f"✅ Собрано {comments_collected} комментариев из discussion groups")
+                else:
+                    self.logger.info("ℹ️  Комментарии не найдены или канал не имеет discussion group")
+            
+            self.logger.info(f"Всего сообщений (включая комментарии): {len(all_messages)}, начинаем группировку")
             
             # ЭТАП 2: Группируем сообщения по альбомам, НО сохраняем исходный порядок
             grouped_messages = {}  # grouped_id -> список сообщений
@@ -382,7 +449,9 @@ class TelegramCopier:
             
             for message in all_messages:
                 # Определяем тип сообщения
-                is_comment = hasattr(message, 'reply_to') and message.reply_to is not None
+                # Комментарии могут быть либо обычными reply, либо из discussion group
+                is_comment = (hasattr(message, 'reply_to') and message.reply_to is not None) or \
+                           (hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group)
                 
                 if is_comment:
                     comments_count += 1
@@ -415,7 +484,9 @@ class TelegramCopier:
             for message in all_messages:
                 try:
                     # НОВОЕ: Определяем тип сообщения (основное или комментарий)
-                    is_comment = hasattr(message, 'reply_to') and message.reply_to is not None
+                    # Комментарии могут быть либо обычными reply, либо из discussion group
+                    is_comment = (hasattr(message, 'reply_to') and message.reply_to is not None) or \
+                               (hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group)
                     
                     # Проверяем, является ли сообщение частью альбома
                     if hasattr(message, 'grouped_id') and message.grouped_id:
