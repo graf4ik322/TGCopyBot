@@ -903,70 +903,10 @@ class TelegramCopier:
             for message in album_messages:
                 if message.media:
                     if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: Для комментариев скачиваем медиа с сохранением атрибутов
-                        self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома с сохранением атрибутов")
-                        
-                        # Получаем информацию о файле из оригинального медиа
-                        original_attributes = None
-                        original_mime_type = None
-                        suggested_filename = None
-                        
-                        if hasattr(message.media, 'document') and message.media.document:
-                            doc = message.media.document
-                            original_attributes = doc.attributes if hasattr(doc, 'attributes') else []
-                            original_mime_type = getattr(doc, 'mime_type', None)
-                            
-                            # Пытаемся извлечь имя файла из атрибутов
-                            from telethon.tl.types import DocumentAttributeFilename
-                            for attr in original_attributes:
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    suggested_filename = attr.file_name
-                                    break
-                            
-                            # Если имя файла не найдено, генерируем на основе MIME-типа
-                            if not suggested_filename:
-                                if original_mime_type:
-                                    if original_mime_type.startswith('image/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('video/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('audio/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
-                                    else:
-                                        suggested_filename = f"file_{message.id}"
-                                else:
-                                    suggested_filename = f"media_{message.id}"
-                        
-                        elif isinstance(message.media, MessageMediaPhoto):
-                            suggested_filename = f"photo_{message.id}.jpg"
-                            original_mime_type = "image/jpeg"
-                        
-                        # Скачиваем файл как bytes
+                        # Для комментариев скачиваем медиа и загружаем заново (как и раньше)
+                        self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома")
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        # ИСПРАВЛЕНИЕ ПРАВИЛЬНОЕ: Создаем InputFile для группированной отправки с именем
-                        if downloaded_file and suggested_filename:
-                            from telethon.tl.types import InputFile, DocumentAttributeFilename
-                            from io import BytesIO
-                            
-                            # Создаем BytesIO объект
-                            file_like = BytesIO(downloaded_file)
-                            
-                            # Создаем InputFile с атрибутами для правильного имени файла
-                            input_file = await self.client.upload_file(
-                                file_like, 
-                                file_name=suggested_filename,
-                                use_cache=False
-                            )
-                            media_files.append(input_file)
-                        else:
-                            # Если не удалось определить имя файла, используем оригинальное медиа
-                            media_files.append(message.media)
+                        media_files.append(downloaded_file)
                     else:
                         # Для основных сообщений используем прямую ссылку
                         media_files.append(message.media)
@@ -1091,19 +1031,13 @@ class TelegramCopier:
                 if isinstance(message.media, MessageMediaPhoto):
                     # Для фотографий
                     if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: Для комментариев скачиваем и загружаем заново с сохранением атрибутов
-                        self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки с атрибутами")
+                        # Для комментариев скачиваем и загружаем заново
+                        self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки")
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        # Определяем имя файла для фото и создаем BytesIO с именем
-                        suggested_filename = f"photo_{message.id}.jpg"
-                        from io import BytesIO
-                        file_like = BytesIO(downloaded_file)
-                        file_like.name = suggested_filename
                         
                         file_kwargs = {
                             'entity': self.target_entity,
-                            'file': file_like,  # Передаем BytesIO с именем файла
+                            'file': downloaded_file,
                             'caption': text,
                             'force_document': False
                         }
@@ -1123,57 +1057,13 @@ class TelegramCopier:
                 elif isinstance(message.media, MessageMediaDocument):
                     # Для документов/видео/аудио
                     if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ: Для комментариев скачиваем и загружаем заново с сохранением атрибутов
-                        self.logger.debug(f"Скачиваем документ из комментария {message.id} для повторной загрузки с атрибутами")
-                        
-                        # Получаем информацию о файле из оригинального медиа
-                        suggested_filename = None
-                        original_mime_type = None
-                        
-                        if hasattr(message.media, 'document') and message.media.document:
-                            doc = message.media.document
-                            original_attributes = doc.attributes if hasattr(doc, 'attributes') else []
-                            original_mime_type = getattr(doc, 'mime_type', None)
-                            
-                            # Пытаемся извлечь имя файла из атрибутов
-                            from telethon.tl.types import DocumentAttributeFilename
-                            for attr in original_attributes:
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    suggested_filename = attr.file_name
-                                    break
-                            
-                            # Если имя файла не найдено, генерируем на основе MIME-типа
-                            if not suggested_filename:
-                                if original_mime_type:
-                                    if original_mime_type.startswith('image/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('video/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('audio/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
-                                    else:
-                                        suggested_filename = f"document_{message.id}"
-                                else:
-                                    suggested_filename = f"document_{message.id}"
-                        
-                        if not suggested_filename:
-                            suggested_filename = f"document_{message.id}"
-                        
+                        # Для комментариев скачиваем и загружаем заново
+                        self.logger.debug(f"Скачиваем документ из комментария {message.id} для повторной загрузки")
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        # Создаем BytesIO с именем файла
-                        from io import BytesIO
-                        file_like = BytesIO(downloaded_file)
-                        file_like.name = suggested_filename
                         
                         file_kwargs = {
                             'entity': self.target_entity,
-                            'file': file_like,  # Передаем BytesIO с именем файла
+                            'file': downloaded_file,
                             'caption': text,
                             'force_document': True
                         }
@@ -1196,39 +1086,13 @@ class TelegramCopier:
                     # Для других типов медиа пытаемся отправить как есть
                     try:
                         if is_from_discussion_group:
-                            # ИСПРАВЛЕНИЕ: Для комментариев скачиваем и загружаем заново с атрибутами
-                            self.logger.debug(f"Скачиваем медиа типа {type(message.media)} из комментария {message.id} с атрибутами")
-                            
-                            # Генерируем базовое имя файла
-                            suggested_filename = f"media_{message.id}"
-                            
-                            # Пытаемся определить расширение по типу медиа
-                            if hasattr(message.media, 'document') and message.media.document:
-                                doc = message.media.document
-                                mime_type = getattr(doc, 'mime_type', None)
-                                if mime_type:
-                                    if mime_type.startswith('image/'):
-                                        extension = mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif mime_type.startswith('video/'):
-                                        extension = mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif mime_type.startswith('audio/'):
-                                        extension = mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
-                            
+                            # Для комментариев скачиваем и загружаем заново
+                            self.logger.debug(f"Скачиваем медиа типа {type(message.media)} из комментария {message.id}")
                             downloaded_file = await self.client.download_media(message.media, file=bytes)
-                            
-                            # Создаем BytesIO с именем файла
-                            from io import BytesIO
-                            file_like = BytesIO(downloaded_file)
-                            file_like.name = suggested_filename
                             
                             file_kwargs = {
                                 'entity': self.target_entity,
-                                'file': file_like,  # Передаем BytesIO с именем файла
+                                'file': downloaded_file,
                                 'caption': text
                             }
                         else:
