@@ -460,7 +460,7 @@ class TelegramCopier:
         
         self.logger.info(f"🔄 Начинаем копирование {total_messages} сообщений в режиме антивложенности")
         self.logger.info("📋 Все комментарии будут превращены в обычные посты в хронологическом порядке")
-        self.logger.info("⚠️ ВНИМАНИЕ: Режим антивложенности может быть медленным для больших каналов")
+        self.logger.info("⚡ Используется оптимизированный потоковый режим (без загрузки в память)")
         
         progress_tracker = ProgressTracker(total_messages)
         
@@ -507,94 +507,86 @@ class TelegramCopier:
                 
                 iter_params['min_id'] = min_id
             
-            # ОПТИМИЗАЦИЯ: Сначала собираем только основные сообщения
-            self.logger.info("🔍 Собираем основные сообщения...")
-            main_messages = []
-            async for message in self.client.iter_messages(self.source_entity, reverse=True, limit=None):
-                main_messages.append(message)
-                if len(main_messages) % 1000 == 0:
-                    self.logger.info(f"📊 Собрано {len(main_messages)} основных сообщений...")
+            # УМНЫЙ ПОТОКОВЫЙ РЕЖИМ: Обрабатываем по порядку ID без загрузки в память
+            self.logger.info("🔄 Используем потоковый режим антивложенности")
             
-            self.logger.info(f"📊 Собрано {len(main_messages)} основных сообщений")
+            # Получаем диапазон ID сообщений
+            first_message_id = None
+            last_message_id = None
             
-            # Теперь собираем комментарии для каждого сообщения
-            self.logger.info("🔍 Собираем комментарии...")
-            all_messages = []
-            
-            for i, message in enumerate(main_messages):
-                all_messages.append(message)
+            async for msg in self.client.iter_messages(self.source_entity, limit=1):
+                last_message_id = msg.id
+                break
                 
-                # Собираем комментарии к этому сообщению
-                try:
-                    async for comment in self.client.iter_messages(self.source_entity, reply_to=message.id, reverse=True, limit=None):
-                        all_messages.append(comment)
-                        
-                        # Рекурсивно собираем комментарии к комментарию (только 1 уровень для оптимизации)
-                        try:
-                            async for sub_comment in self.client.iter_messages(self.source_entity, reply_to=comment.id, reverse=True, limit=None):
-                                all_messages.append(sub_comment)
-                        except Exception:
-                            pass  # Игнорируем ошибки на глубоких уровнях
-                            
-                except Exception:
-                    pass  # Игнорируем ошибки получения комментариев
-                
-                # Показываем прогресс
-                if (i + 1) % 100 == 0:
-                    self.logger.info(f"📊 Обработано {i + 1}/{len(main_messages)} сообщений, собрано {len(all_messages)} сообщений+комментариев")
+            async for msg in self.client.iter_messages(self.source_entity, reverse=True, limit=1):
+                first_message_id = msg.id
+                break
             
-            # Сортируем все сообщения по ID для строгой хронологии
-            all_messages.sort(key=lambda x: x.id)
+            if not first_message_id or not last_message_id:
+                self.logger.error("Не удалось определить диапазон сообщений")
+                return {'error': 'Не удалось определить диапазон сообщений'}
             
-            # Фильтруем по min_id если нужно
-            if min_id:
-                all_messages = [msg for msg in all_messages if msg.id > min_id]
+            self.logger.info(f"📊 Диапазон сообщений: {first_message_id} - {last_message_id}")
             
-            self.logger.info(f"📊 Итого собрано {len(all_messages)} сообщений (включая комментарии) для плоского копирования")
+            # Начинаем с нужного места
+            start_id = max(first_message_id, min_id + 1) if min_id else first_message_id
             
-            # Обрабатываем все сообщения как обычную линейную последовательность
+            # Обрабатываем все ID по порядку (потоковая обработка)
             pending_albums = {}
             message_count = 0
+            processed_count = 0
             
-            for message in all_messages:
-                message_count += 1
-                
-                # Проверка дедупликации
-                if self.deduplicator.is_message_processed(message):
-                    self.logger.debug(f"Сообщение {message.id} уже было обработано ранее, пропускаем")
-                    self.skipped_messages += 1
-                    continue
-                
+            for current_id in range(start_id, last_message_id + 1):
                 try:
-                    # В режиме антивложенности обрабатываем каждое сообщение как независимое
-                    # БЕЗ обработки комментариев (они уже в общем списке)
+                    # Пытаемся получить сообщение с текущим ID
+                    try:
+                        message = await self.client.get_messages(self.source_entity, ids=current_id)
+                        if not message or message.empty:
+                            continue  # Сообщение не существует, переходим к следующему ID
+                        message = message[0] if isinstance(message, list) else message
+                    except Exception:
+                        continue  # Ошибка получения сообщения, пропускаем
+                    
+                    message_count += 1
+                    
+                    # Проверка дедупликации
+                    if self.deduplicator.is_message_processed(message):
+                        self.logger.debug(f"Сообщение {message.id} уже было обработано ранее, пропускаем")
+                        self.skipped_messages += 1
+                        continue
+                    
+                    # Обрабатываем сообщение как независимое (без комментариев)
                     success = await self._process_message_chronologically(
                         message, pending_albums, progress_tracker
                     )
                     
                     if success:
-                        # НЕ обрабатываем комментарии - это ключевое отличие от обычного режима
+                        processed_count += 1
                         save_last_message_id(message.id, self.resume_file)
-                        self.logger.debug(f"✅ Сообщение {message.id} обработано в плоском режиме")
+                        self.logger.debug(f"✅ Сообщение {message.id} обработано в потоковом режиме")
+                        
+                        # Соблюдаем лимиты скорости
+                        if not self.dry_run:
+                            await self.rate_limiter.wait_if_needed()
+                            self.rate_limiter.record_message_sent()
+                    
+                    # Показываем прогресс
+                    if message_count % 100 == 0:
+                        progress_percent = ((current_id - start_id) / (last_message_id - start_id)) * 100
+                        self.logger.info(f"📊 Прогресс: {progress_percent:.1f}% | Обработано: {processed_count} | ID: {current_id}/{last_message_id}")
                     
                 except FloodWaitError as e:
                     await handle_flood_wait(e, self.logger)
-                    # Повторяем попытку
-                    success = await self._process_message_chronologically(
-                        message, pending_albums, progress_tracker
-                    )
-                    if success:
-                        save_last_message_id(message.id, self.resume_file)
-                        if not self.dry_run:
-                            self.rate_limiter.record_message_sent()
+                    # Повторяем обработку этого же ID
+                    current_id -= 1  # Вернемся к этому ID на следующей итерации
                     
                 except (PeerFloodError, MediaInvalidError) as e:
-                    self.logger.warning(f"Telegram API ошибка для сообщения {message.id}: {e}")
+                    self.logger.warning(f"Telegram API ошибка для сообщения {current_id}: {e}")
                     self.failed_messages += 1
                     progress_tracker.update(False)
                     
                 except Exception as e:
-                    self.logger.error(f"Неожиданная ошибка обработки сообщения {message.id}: {type(e).__name__}: {e}")
+                    self.logger.error(f"Неожиданная ошибка обработки сообщения {current_id}: {type(e).__name__}: {e}")
                     self.failed_messages += 1
                     progress_tracker.update(False)
             
