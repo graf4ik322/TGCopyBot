@@ -455,6 +455,7 @@ class TelegramCopier:
                                                   progress_tracker: ProgressTracker) -> bool:
         """
         Обработка сообщения альбома в хронологическом контексте.
+        УЛУЧШЕНО: Более надежная логика группировки альбомов.
         
         Args:
             message: Сообщение альбома
@@ -473,18 +474,34 @@ class TelegramCopier:
         
         self.logger.debug(f"📎 Добавлено сообщение {message.id} в альбом {grouped_id}")
         
-        # КРИТИЧЕСКАЯ ЛОГИКА: Проверяем, завершен ли альбом
-        # Получаем следующее сообщение для проверки
+        # УЛУЧШЕННАЯ ЛОГИКА: Используем комбинацию методов для определения завершения альбома
+        
+        # Метод 1: Проверяем следующее сообщение
         next_message = await self._peek_next_message(message.id)
         
-        # Альбом завершен, если:
+        # Метод 2: Альбом завершен, если:
         # 1. Следующего сообщения нет, ИЛИ
-        # 2. Следующее сообщение не принадлежит этому альбому
+        # 2. Следующее сообщение не принадлежит этому альбому, ИЛИ
+        # 3. Альбом достиг максимального размера (защита от бесконечного ожидания)
+        album_messages = pending_album_messages[grouped_id]
+        max_album_size = 10  # Максимальный размер альбома в Telegram
+        
         album_completed = (
             next_message is None or 
             not hasattr(next_message, 'grouped_id') or 
-            next_message.grouped_id != grouped_id
+            next_message.grouped_id != grouped_id or
+            len(album_messages) >= max_album_size
         )
+        
+        # ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА: Если альбом не завершен, но мы в режиме reverse=True,
+        # то, возможно, это последнее сообщение в альбоме по хронологии
+        if not album_completed and len(album_messages) > 1:
+            # Сортируем сообщения альбома по ID
+            sorted_messages = sorted(album_messages, key=lambda x: x.id)
+            # Если текущее сообщение - последнее по ID, возможно альбом завершен
+            if message.id == sorted_messages[-1].id:
+                self.logger.debug(f"Альбом {grouped_id} возможно завершен (последнее сообщение по ID)")
+                album_completed = True
         
         if album_completed:
             # Альбом завершен - обрабатываем его
@@ -492,6 +509,15 @@ class TelegramCopier:
             album_messages.sort(key=lambda x: x.id)  # Сортируем по ID для правильного порядка
             
             self.logger.info(f"🎬 Обрабатываем завершенный альбом {grouped_id} из {len(album_messages)} сообщений")
+            
+            # Дополнительная проверка: убеждаемся, что все сообщения действительно имеют медиа
+            media_count = sum(1 for msg in album_messages if msg.media)
+            if media_count == 0:
+                self.logger.warning(f"Альбом {grouped_id} не содержит медиа, обрабатываем как текстовое сообщение")
+                # Обрабатываем первое сообщение как обычное текстовое
+                if album_messages:
+                    return await self._process_single_message_chronologically(album_messages[0], progress_tracker)
+                return False
             
             # Вычисляем общий размер альбома для мониторинга
             total_size = 0
@@ -513,10 +539,7 @@ class TelegramCopier:
                 self.copied_messages += len(album_messages)
                 self.logger.info(f"✅ Альбом {grouped_id} успешно скопирован")
                 
-                # Записываем в трекер все ID альбома
-                if self.message_tracker:
-                    album_ids = [msg.id for msg in album_messages]
-                    self.message_tracker.mark_album_copied(album_ids, [])  # target_ids заполнятся позже
+                # Трекер будет обновлен в методе copy_album с реальными target_ids
                 
                 # Соблюдаем лимиты скорости
                 if not self.dry_run:
@@ -529,7 +552,7 @@ class TelegramCopier:
             return success
         else:
             # Альбом еще не завершен - ждем следующие сообщения
-            self.logger.debug(f"⏳ Альбом {grouped_id} еще не завершен, ждем следующие сообщения")
+            self.logger.debug(f"⏳ Альбом {grouped_id} еще не завершен ({len(album_messages)} сообщений), ждем следующие сообщения")
             return False  # Пока не обрабатываем
     
     async def _peek_next_message(self, current_message_id: int) -> Optional[Message]:
@@ -584,9 +607,7 @@ class TelegramCopier:
             self.copied_messages += 1
             self.logger.debug(f"✅ Сообщение {message.id} успешно скопировано")
             
-            # Записываем в трекер
-            if self.message_tracker:
-                self.message_tracker.mark_message_copied(message.id, 0)  # target_id заполнится позже
+            # Записываем в трекер - target_id будет обновлен в copy_single_message
             
             # Соблюдаем лимиты скорости
             if not self.dry_run:
@@ -686,9 +707,7 @@ class TelegramCopier:
                         self.copied_messages += len(album_messages)
                         self.logger.info(f"✅ Альбом {grouped_id} успешно завершен")
                         
-                        if self.message_tracker:
-                            album_ids = [msg.id for msg in album_messages]
-                            self.message_tracker.mark_album_copied(album_ids, [])
+                        # Трекер будет обновлен в методе copy_album с реальными target_ids
                         
                         if not self.dry_run:
                             await self.rate_limiter.wait_if_needed()
@@ -756,10 +775,11 @@ class TelegramCopier:
                 self.logger.info(f"[DRY RUN] Альбом из {len(album_messages)} сообщений: {first_message.message[:50] if first_message.message else 'медиа'}")
                 return True
             
-            # Собираем все медиа файлы из альбома
+            # ИСПРАВЛЕНИЕ: Правильная подготовка медиа для группированной отправки
             media_files = []
             for message in album_messages:
                 if message.media:
+                    # Для правильного альбома нужно передавать сами медиа объекты
                     media_files.append(message.media)
             
             if not media_files:
@@ -772,7 +792,7 @@ class TelegramCopier:
             # Получаем текст из первого сообщения альбома
             caption = first_message.message or ""
             
-            # Подготавливаем параметры для отправки альбома
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильные параметры для отправки альбома
             send_kwargs = {
                 'entity': self.target_entity,
                 'file': media_files,  # Массив медиа файлов
@@ -786,11 +806,23 @@ class TelegramCopier:
             # Отправляем альбом как группированные медиа
             sent_messages = await self.client.send_file(**send_kwargs)
             
-            # sent_messages может быть списком или одним сообщением
+            # sent_messages должен быть списком сообщений альбома
             if isinstance(sent_messages, list):
                 self.logger.info(f"Альбом успешно отправлен как {len(sent_messages)} сообщений")
+                
+                # ИСПРАВЛЕНИЕ: Обновляем трекер с реальными ID отправленных сообщений
+                if self.message_tracker and sent_messages:
+                    source_ids = [msg.id for msg in album_messages]
+                    target_ids = [msg.id for msg in sent_messages]
+                    self.message_tracker.mark_album_copied(source_ids, target_ids)
             else:
                 self.logger.info(f"Альбом успешно отправлен как сообщение {sent_messages.id}")
+                
+                # Если получили одно сообщение вместо альбома
+                if self.message_tracker:
+                    source_ids = [msg.id for msg in album_messages]
+                    target_ids = [sent_messages.id]
+                    self.message_tracker.mark_album_copied(source_ids, target_ids)
             
             return True
             
@@ -906,6 +938,10 @@ class TelegramCopier:
             else:
                 # Отправляем текстовое сообщение с сохранением форматирования
                 sent_message = await self.client.send_message(**send_kwargs)
+            
+            # ИСПРАВЛЕНИЕ: Обновляем трекер с реальным ID отправленного сообщения
+            if self.message_tracker and sent_message:
+                self.message_tracker.mark_message_copied(message.id, sent_message.id)
             
             self.logger.debug(f"Сообщение {message.id} успешно скопировано как {sent_message.id}")
             return True

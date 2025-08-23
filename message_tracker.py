@@ -105,23 +105,32 @@ class MessageTracker:
         Отметить альбом как скопированный.
         
         Args:
-            source_ids: Список ID сообщений в исходном канале
-            target_ids: Список ID сообщений в целевом канале
+            source_ids: Список ID исходных сообщений альбома
+            target_ids: Список ID скопированных сообщений альбома
         """
         timestamp = datetime.now().isoformat()
         
+        # ИСПРАВЛЕНИЕ: Безопасная обработка target_ids для предотвращения IndexError
         for i, source_id in enumerate(source_ids):
-            target_id = target_ids[i] if i < len(target_ids) else target_ids[0]
+            # Если target_ids пустой или недостаточно элементов, используем 0 как заглушку
+            if target_ids and i < len(target_ids):
+                target_id = target_ids[i]
+            elif target_ids:
+                target_id = target_ids[0]  # Используем первый элемент как fallback
+            else:
+                target_id = 0  # Заглушка для случая пустого target_ids
             
             self.data["copied_messages"][str(source_id)] = {
                 "target_id": target_id,
                 "timestamp": timestamp,
                 "type": "album",
                 "status": "copied",
+                "album_position": i + 1,
                 "album_size": len(source_ids)
             }
         
         self.data["statistics"]["total_copied"] += len(source_ids)
+        self.data["statistics"]["last_updated"] = datetime.now().isoformat()
         self._save_data()
         
         self.logger.debug(f"Отмечен альбом как скопированный: {len(source_ids)} сообщений")
