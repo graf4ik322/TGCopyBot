@@ -15,7 +15,8 @@ from telethon.tl.types import (
     MessageEntityHashtag, MessageEntityBold, MessageEntityItalic,
     MessageEntityCode, MessageEntityPre, MessageEntityStrike,
     MessageEntityUnderline, MessageEntitySpoiler, MessageEntityBlockquote,
-    ChannelParticipantAdmin, ChannelParticipantCreator, PeerChannel
+    ChannelParticipantAdmin, ChannelParticipantCreator, PeerChannel,
+    DocumentAttributeFilename
 )
 from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
 from telethon.tl import functions
@@ -903,10 +904,64 @@ class TelegramCopier:
             for message in album_messages:
                 if message.media:
                     if is_from_discussion_group:
-                        # Для комментариев скачиваем медиа и загружаем заново (как и раньше)
-                        self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома")
+                        # Для комментариев скачиваем медиа и создаем временный файл с правильным именем
+                        self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома с сохранением атрибутов")
+                        
+                        # Получаем информацию о файле из оригинального медиа
+                        suggested_filename = None
+                        
+                        if hasattr(message.media, 'document') and message.media.document:
+                            doc = message.media.document
+                            
+                            # Пытаемся извлечь имя файла из атрибутов
+                            for attr in getattr(doc, 'attributes', []):
+                                if isinstance(attr, DocumentAttributeFilename):
+                                    suggested_filename = attr.file_name
+                                    break
+                            
+                            # Если имя файла не найдено, генерируем на основе MIME-типа
+                            if not suggested_filename:
+                                mime_type = getattr(doc, 'mime_type', None)
+                                if mime_type:
+                                    if mime_type.startswith('image/'):
+                                        extension = mime_type.split('/')[-1]
+                                        if extension == 'jpeg':
+                                            extension = 'jpg'
+                                        suggested_filename = f"image_{message.id}.{extension}"
+                                    elif mime_type.startswith('video/'):
+                                        extension = mime_type.split('/')[-1]
+                                        suggested_filename = f"video_{message.id}.{extension}"
+                                    elif mime_type.startswith('audio/'):
+                                        extension = mime_type.split('/')[-1]
+                                        suggested_filename = f"audio_{message.id}.{extension}"
+                                    else:
+                                        suggested_filename = f"document_{message.id}"
+                                else:
+                                    suggested_filename = f"document_{message.id}"
+                        
+                        elif isinstance(message.media, MessageMediaPhoto):
+                            suggested_filename = f"photo_{message.id}.jpg"
+                        
+                        if not suggested_filename:
+                            suggested_filename = f"media_{message.id}"
+                        
+                        # Скачиваем файл как bytes
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        media_files.append(downloaded_file)
+                        
+                        # Создаем временный файл в памяти с правильным именем
+                        import tempfile
+                        import os
+                        
+                        # Создаем временный файл с правильным именем
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{suggested_filename}") as temp_file:
+                            temp_file.write(downloaded_file)
+                            temp_file_path = temp_file.name
+                        
+                        # Переименовываем файл для правильного имени
+                        proper_temp_path = os.path.join(os.path.dirname(temp_file_path), suggested_filename)
+                        os.rename(temp_file_path, proper_temp_path)
+                        
+                        media_files.append(proper_temp_path)
                     else:
                         # Для основных сообщений используем прямую ссылку
                         media_files.append(message.media)
@@ -937,9 +992,22 @@ class TelegramCopier:
             # Отправляем альбом как группированные медиа
             sent_messages = await self.client.send_file(**send_kwargs)
             
+            # ВАЖНО: Очищаем временные файлы после отправки
+            temp_files_to_cleanup = []
+            for media_file in media_files:
+                if isinstance(media_file, str) and os.path.exists(media_file) and media_file.startswith('/tmp'):
+                    temp_files_to_cleanup.append(media_file)
+            
+            for temp_file in temp_files_to_cleanup:
+                try:
+                    os.remove(temp_file)
+                    self.logger.debug(f"Удален временный файл: {temp_file}")
+                except Exception as e:
+                    self.logger.warning(f"Не удалось удалить временный файл {temp_file}: {e}")
+            
             # Анализируем результат
             if isinstance(sent_messages, list):
-                self.logger.info(f"✅ Альбом успешно отправлен как {len(sent_messages)} сообщений")
+                self.logger.info(f"✅ Альбом успешно отправлен как {len(sent_messages)} сообщений с правильными именами файлов")
                 
                 # Обновляем трекер с реальными ID отправленных сообщений
                 if self.message_tracker and sent_messages:
@@ -979,6 +1047,17 @@ class TelegramCopier:
             
         except Exception as e:
             self.logger.error(f"Ошибка копирования альбома: {e}")
+            
+            # Очищаем временные файлы в случае ошибки
+            if 'media_files' in locals():
+                for media_file in media_files:
+                    if isinstance(media_file, str) and os.path.exists(media_file) and media_file.startswith('/tmp'):
+                        try:
+                            os.remove(media_file)
+                            self.logger.debug(f"Удален временный файл после ошибки: {media_file}")
+                        except Exception as cleanup_error:
+                            self.logger.warning(f"Не удалось удалить временный файл {media_file}: {cleanup_error}")
+            
             return False
     
     async def copy_single_message(self, message: Message) -> bool:
@@ -1031,16 +1110,31 @@ class TelegramCopier:
                 if isinstance(message.media, MessageMediaPhoto):
                     # Для фотографий
                     if is_from_discussion_group:
-                        # Для комментариев скачиваем и загружаем заново
-                        self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки")
+                        # Для комментариев скачиваем и создаем временный файл с правильным именем
+                        self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки с сохранением имени")
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
+                        
+                        # Создаем временный файл с правильным именем
+                        suggested_filename = f"photo_{message.id}.jpg"
+                        import tempfile
+                        import os
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{suggested_filename}") as temp_file:
+                            temp_file.write(downloaded_file)
+                            temp_file_path = temp_file.name
+                        
+                        proper_temp_path = os.path.join(os.path.dirname(temp_file_path), suggested_filename)
+                        os.rename(temp_file_path, proper_temp_path)
                         
                         file_kwargs = {
                             'entity': self.target_entity,
-                            'file': downloaded_file,
+                            'file': proper_temp_path,
                             'caption': text,
                             'force_document': False
                         }
+                        
+                        # Удаляем временный файл после отправки будет ниже
+                        temp_file_to_cleanup = proper_temp_path
                     else:
                         # Для основных сообщений используем прямую ссылку
                         file_kwargs = {
@@ -1049,24 +1143,77 @@ class TelegramCopier:
                             'caption': text,
                             'force_document': False
                         }
+                        temp_file_to_cleanup = None
                     
                     if message.entities:
                         file_kwargs['formatting_entities'] = message.entities
                     sent_message = await self.client.send_file(**file_kwargs)
+                    
+                    # Удаляем временный файл если он был создан
+                    if temp_file_to_cleanup:
+                        try:
+                            os.remove(temp_file_to_cleanup)
+                        except Exception as e:
+                            self.logger.warning(f"Не удалось удалить временный файл {temp_file_to_cleanup}: {e}")
                     
                 elif isinstance(message.media, MessageMediaDocument):
                     # Для документов/видео/аудио
                     if is_from_discussion_group:
-                        # Для комментариев скачиваем и загружаем заново
-                        self.logger.debug(f"Скачиваем документ из комментария {message.id} для повторной загрузки")
+                        # Для комментариев скачиваем и создаем временный файл с правильным именем
+                        self.logger.debug(f"Скачиваем документ из комментария {message.id} для повторной загрузки с сохранением имени")
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
+                        
+                        # Определяем правильное имя файла
+                        suggested_filename = None
+                        if hasattr(message.media, 'document') and message.media.document:
+                            doc = message.media.document
+                            # Пытаемся извлечь имя файла из атрибутов
+                            for attr in getattr(doc, 'attributes', []):
+                                if isinstance(attr, DocumentAttributeFilename):
+                                    suggested_filename = attr.file_name
+                                    break
+                            
+                            # Если имя файла не найдено, генерируем на основе MIME-типа
+                            if not suggested_filename:
+                                mime_type = getattr(doc, 'mime_type', None)
+                                if mime_type:
+                                    if mime_type.startswith('image/'):
+                                        extension = mime_type.split('/')[-1]
+                                        if extension == 'jpeg':
+                                            extension = 'jpg'
+                                        suggested_filename = f"image_{message.id}.{extension}"
+                                    elif mime_type.startswith('video/'):
+                                        extension = mime_type.split('/')[-1]
+                                        suggested_filename = f"video_{message.id}.{extension}"
+                                    elif mime_type.startswith('audio/'):
+                                        extension = mime_type.split('/')[-1]
+                                        suggested_filename = f"audio_{message.id}.{extension}"
+                                    else:
+                                        suggested_filename = f"document_{message.id}"
+                                else:
+                                    suggested_filename = f"document_{message.id}"
+                        
+                        if not suggested_filename:
+                            suggested_filename = f"document_{message.id}"
+                        
+                        # Создаем временный файл с правильным именем
+                        import tempfile
+                        import os
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{suggested_filename}") as temp_file:
+                            temp_file.write(downloaded_file)
+                            temp_file_path = temp_file.name
+                        
+                        proper_temp_path = os.path.join(os.path.dirname(temp_file_path), suggested_filename)
+                        os.rename(temp_file_path, proper_temp_path)
                         
                         file_kwargs = {
                             'entity': self.target_entity,
-                            'file': downloaded_file,
+                            'file': proper_temp_path,
                             'caption': text,
                             'force_document': True
                         }
+                        temp_file_to_cleanup = proper_temp_path
                     else:
                         # Для основных сообщений используем прямую ссылку
                         file_kwargs = {
@@ -1075,10 +1222,18 @@ class TelegramCopier:
                             'caption': text,
                             'force_document': True
                         }
+                        temp_file_to_cleanup = None
                     
                     if message.entities:
                         file_kwargs['formatting_entities'] = message.entities
                     sent_message = await self.client.send_file(**file_kwargs)
+                    
+                    # Удаляем временный файл если он был создан
+                    if temp_file_to_cleanup:
+                        try:
+                            os.remove(temp_file_to_cleanup)
+                        except Exception as e:
+                            self.logger.warning(f"Не удалось удалить временный файл {temp_file_to_cleanup}: {e}")
                 elif isinstance(message.media, MessageMediaWebPage):
                     # Для веб-страниц отправляем только текст с entities
                     sent_message = await self.client.send_message(**send_kwargs)
