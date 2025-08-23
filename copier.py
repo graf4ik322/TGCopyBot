@@ -362,9 +362,9 @@ class TelegramCopier:
             
             self.logger.info(f"Всего собрано {len(all_messages)} сообщений, начинаем группировку")
             
-            # ЭТАП 2: Группируем сообщения по альбомам
+            # ЭТАП 2: Группируем сообщения по альбомам, НО сохраняем исходный порядок
             grouped_messages = {}  # grouped_id -> список сообщений
-            messages_to_process = []  # одиночные сообщения
+            processed_albums = set()  # уже обработанные альбомы
             
             for message in all_messages:
                 # Проверяем, является ли сообщение частью альбома
@@ -374,148 +374,171 @@ class TelegramCopier:
                         grouped_messages[message.grouped_id] = []
                     grouped_messages[message.grouped_id].append(message)
                     self.logger.debug(f"Добавлено сообщение {message.id} в альбом {message.grouped_id}")
-                else:
-                    # Обычное сообщение
-                    messages_to_process.append(message)
             
-            self.logger.info(f"Собрано {len(messages_to_process)} одиночных сообщений и {len(grouped_messages)} альбомов")
+            self.logger.info(f"Собрано {len(all_messages)} сообщений, из них альбомов: {len(grouped_messages)}")
             
             # Инициализируем трекер прогресса
             progress_tracker = ProgressTracker(total_messages)
             
-            # ЭТАП 3: Обрабатываем собранные альбомы
-            for grouped_id, album_messages in grouped_messages.items():
-                # Сортируем сообщения альбома по ID для правильного порядка
-                album_messages.sort(key=lambda x: x.id)
-                
+            # ЭТАП 3: Обрабатываем сообщения в ИСХОДНОМ ПОРЯДКЕ
+            for message in all_messages:
                 try:
-                    self.logger.info(f"🎬 Обрабатываем альбом {grouped_id} из {len(album_messages)} сообщений")
-                    
-                    # Вычисляем общий размер альбома для мониторинга
-                    total_size = 0
-                    for msg in album_messages:
-                        if msg.media and hasattr(msg.media, 'document') and msg.media.document:
-                            total_size += getattr(msg.media.document, 'size', 0)
-                        elif msg.message:
-                            total_size += len(msg.message.encode('utf-8'))
-                    
-                    # Копируем альбом как единое целое
-                    success = await self.copy_album(album_messages)
-                    
-                    # Обновляем статистику для всех сообщений альбома
-                    for msg in album_messages:
-                        progress_tracker.update(success)
-                        self.performance_monitor.record_message_processed(success, total_size // len(album_messages))
-                    
-                    if success:
-                        self.copied_messages += len(album_messages)
-                        self.logger.info(f"✅ Альбом {grouped_id} успешно скопирован")
+                    # Проверяем, является ли сообщение частью альбома
+                    if hasattr(message, 'grouped_id') and message.grouped_id:
+                        grouped_id = message.grouped_id
                         
-                        # Записываем ID последнего сообщения альбома
-                        last_album_message_id = max(msg.id for msg in album_messages)
-                        save_last_message_id(last_album_message_id, self.resume_file)
-                        self.logger.debug(f"Записан ID {last_album_message_id} после успешного копирования альбома")
-                    else:
-                        self.failed_messages += len(album_messages)
-                        self.logger.warning(f"❌ Не удалось скопировать альбом {grouped_id}")
-                    
-                    # Соблюдаем лимиты скорости
-                    if not self.dry_run:
-                        await self.rate_limiter.wait_if_needed()
+                        # Если этот альбом уже обработан, пропускаем
+                        if grouped_id in processed_albums:
+                            continue
+                        
+                        # Обрабатываем весь альбом целиком
+                        album_messages = grouped_messages[grouped_id]
+                        album_messages.sort(key=lambda x: x.id)  # Сортируем по ID для правильного порядка
+                        
+                        self.logger.info(f"🎬 Обрабатываем альбом {grouped_id} из {len(album_messages)} сообщений")
+                        
+                        # Вычисляем общий размер альбома для мониторинга
+                        total_size = 0
+                        for msg in album_messages:
+                            if msg.media and hasattr(msg.media, 'document') and msg.media.document:
+                                total_size += getattr(msg.media.document, 'size', 0)
+                            elif msg.message:
+                                total_size += len(msg.message.encode('utf-8'))
+                        
+                        # Копируем альбом как единое целое
+                        success = await self.copy_album(album_messages)
+                        
+                        # Обновляем статистику для всех сообщений альбома
+                        for msg in album_messages:
+                            progress_tracker.update(success)
+                            self.performance_monitor.record_message_processed(success, total_size // len(album_messages))
+                        
                         if success:
-                            self.rate_limiter.record_message_sent()
-                
-                except FloodWaitError as e:
-                    await handle_flood_wait(e, self.logger)
-                    # Повторяем попытку копирования альбома
-                    success = await self.copy_album(album_messages)
+                            self.copied_messages += len(album_messages)
+                            self.logger.info(f"✅ Альбом {grouped_id} успешно скопирован")
+                            
+                            # Записываем ID последнего сообщения альбома
+                            last_album_message_id = max(msg.id for msg in album_messages)
+                            save_last_message_id(last_album_message_id, self.resume_file)
+                            self.logger.debug(f"Записан ID {last_album_message_id} после успешного копирования альбома")
+                        else:
+                            self.failed_messages += len(album_messages)
+                            self.logger.warning(f"❌ Не удалось скопировать альбом {grouped_id}")
+                        
+                        # Помечаем альбом как обработанный
+                        processed_albums.add(grouped_id)
+                        
+                        # Соблюдаем лимиты скорости
+                        if not self.dry_run:
+                            await self.rate_limiter.wait_if_needed()
+                            if success:
+                                self.rate_limiter.record_message_sent()
                     
-                    for msg in album_messages:
+                    else:
+                        # Обычное одиночное сообщение
+                        # Вычисляем размер сообщения для мониторинга
+                        message_size = 0
+                        if message.media and hasattr(message.media, 'document') and message.media.document:
+                            message_size = getattr(message.media.document, 'size', 0)
+                        elif message.message:
+                            message_size = len(message.message.encode('utf-8'))
+                        
+                        # Копируем сообщение
+                        success = await self.copy_single_message(message)
                         progress_tracker.update(success)
-                    
-                    if success:
-                        self.copied_messages += len(album_messages)
-                        self.logger.info(f"✅ Альбом {grouped_id} успешно скопирован после FloodWait")
-                        last_album_message_id = max(msg.id for msg in album_messages)
-                        save_last_message_id(last_album_message_id, self.resume_file)
-                        self.logger.debug(f"Записан ID {last_album_message_id} после успешного копирования альбома (FloodWait)")
-                        if not self.dry_run:
-                            self.rate_limiter.record_message_sent()
-                    else:
-                        self.failed_messages += len(album_messages)
-                        self.logger.warning(f"❌ Не удалось скопировать альбом {grouped_id} даже после FloodWait")
-                
-                except (PeerFloodError, MediaInvalidError) as e:
-                    self.logger.warning(f"Telegram API ошибка для альбома {grouped_id}: {e}")
-                    self.failed_messages += len(album_messages)
-                    for msg in album_messages:
-                        progress_tracker.update(False)
-                
-                except Exception as e:
-                    self.logger.error(f"Неожиданная ошибка копирования альбома {grouped_id}: {type(e).__name__}: {e}")
-                    self.failed_messages += len(album_messages)
-                    for msg in album_messages:
-                        progress_tracker.update(False)
-            
-            # ЭТАП 4: Обрабатываем одиночные сообщения
-            for message in messages_to_process:
-                try:
-                    # Вычисляем размер сообщения для мониторинга
-                    message_size = 0
-                    if message.media and hasattr(message.media, 'document') and message.media.document:
-                        message_size = getattr(message.media.document, 'size', 0)
-                    elif message.message:
-                        message_size = len(message.message.encode('utf-8'))
-                    
-                    # Копируем сообщение
-                    success = await self.copy_single_message(message)
-                    progress_tracker.update(success)
-                    
-                    # Записываем в мониторинг производительности
-                    self.performance_monitor.record_message_processed(success, message_size)
-                    
-                    if success:
-                        self.copied_messages += 1
-                        self.logger.debug(f"✅ Сообщение {message.id} успешно скопировано")
-                        save_last_message_id(message.id, self.resume_file)
-                        self.logger.debug(f"Записан ID {message.id} после успешного копирования")
-                    else:
-                        self.failed_messages += 1
-                        self.logger.warning(f"❌ Не удалось скопировать сообщение {message.id}")
-                    
-                    # Соблюдаем лимиты скорости
-                    if not self.dry_run:
-                        await self.rate_limiter.wait_if_needed()
+                        
+                        # Записываем в мониторинг производительности
+                        self.performance_monitor.record_message_processed(success, message_size)
+                        
                         if success:
-                            self.rate_limiter.record_message_sent()
-                    
+                            self.copied_messages += 1
+                            self.logger.debug(f"✅ Сообщение {message.id} успешно скопировано")
+                            save_last_message_id(message.id, self.resume_file)
+                            self.logger.debug(f"Записан ID {message.id} после успешного копирования")
+                        else:
+                            self.failed_messages += 1
+                            self.logger.warning(f"❌ Не удалось скопировать сообщение {message.id}")
+                        
+                        # Соблюдаем лимиты скорости
+                        if not self.dry_run:
+                            await self.rate_limiter.wait_if_needed()
+                            if success:
+                                self.rate_limiter.record_message_sent()
+                
                 except FloodWaitError as e:
                     await handle_flood_wait(e, self.logger)
-                    success = await self.copy_single_message(message)
-                    progress_tracker.update(success)
-                    
-                    if success:
-                        self.copied_messages += 1
-                        self.logger.debug(f"✅ Сообщение {message.id} успешно скопировано после FloodWait")
-                        save_last_message_id(message.id, self.resume_file)
-                        self.logger.debug(f"Записан ID {message.id} после успешного копирования (FloodWait)")
-                        if not self.dry_run:
-                            self.rate_limiter.record_message_sent()
+                    # Повторяем попытку для текущего сообщения
+                    if hasattr(message, 'grouped_id') and message.grouped_id and message.grouped_id not in processed_albums:
+                        # Повторяем альбом
+                        grouped_id = message.grouped_id
+                        album_messages = grouped_messages[grouped_id]
+                        album_messages.sort(key=lambda x: x.id)
+                        success = await self.copy_album(album_messages)
+                        
+                        for msg in album_messages:
+                            progress_tracker.update(success)
+                        
+                        if success:
+                            self.copied_messages += len(album_messages)
+                            self.logger.info(f"✅ Альбом {grouped_id} успешно скопирован после FloodWait")
+                            last_album_message_id = max(msg.id for msg in album_messages)
+                            save_last_message_id(last_album_message_id, self.resume_file)
+                            self.logger.debug(f"Записан ID {last_album_message_id} после успешного копирования альбома (FloodWait)")
+                            if not self.dry_run:
+                                self.rate_limiter.record_message_sent()
+                        else:
+                            self.failed_messages += len(album_messages)
+                            self.logger.warning(f"❌ Не удалось скопировать альбом {grouped_id} даже после FloodWait")
+                        
+                        processed_albums.add(grouped_id)
+                        
                     else:
-                        self.failed_messages += 1
-                        self.logger.warning(f"❌ Не удалось скопировать сообщение {message.id} даже после FloodWait")
-                    
+                        # Повторяем одиночное сообщение
+                        success = await self.copy_single_message(message)
+                        progress_tracker.update(success)
+                        
+                        if success:
+                            self.copied_messages += 1
+                            self.logger.debug(f"✅ Сообщение {message.id} успешно скопировано после FloodWait")
+                            save_last_message_id(message.id, self.resume_file)
+                            self.logger.debug(f"Записан ID {message.id} после успешного копирования (FloodWait)")
+                            if not self.dry_run:
+                                self.rate_limiter.record_message_sent()
+                        else:
+                            self.failed_messages += 1
+                            self.logger.warning(f"❌ Не удалось скопировать сообщение {message.id} даже после FloodWait")
+                
                 except (PeerFloodError, MediaInvalidError) as e:
-                    self.logger.warning(f"Telegram API ошибка для сообщения {message.id}: {e}")
-                    self.failed_messages += 1
-                    progress_tracker.update(False)
-                    
+                    if hasattr(message, 'grouped_id') and message.grouped_id:
+                        grouped_id = message.grouped_id
+                        if grouped_id not in processed_albums:
+                            album_messages = grouped_messages[grouped_id]
+                            self.logger.warning(f"Telegram API ошибка для альбома {grouped_id}: {e}")
+                            self.failed_messages += len(album_messages)
+                            for msg in album_messages:
+                                progress_tracker.update(False)
+                            processed_albums.add(grouped_id)
+                    else:
+                        self.logger.warning(f"Telegram API ошибка для сообщения {message.id}: {e}")
+                        self.failed_messages += 1
+                        progress_tracker.update(False)
+                
                 except Exception as e:
-                    self.logger.error(f"Неожиданная ошибка копирования сообщения {message.id}: {type(e).__name__}: {e}")
-                    self.failed_messages += 1
-                    progress_tracker.update(False)
+                    if hasattr(message, 'grouped_id') and message.grouped_id:
+                        grouped_id = message.grouped_id
+                        if grouped_id not in processed_albums:
+                            album_messages = grouped_messages[grouped_id]
+                            self.logger.error(f"Неожиданная ошибка копирования альбома {grouped_id}: {type(e).__name__}: {e}")
+                            self.failed_messages += len(album_messages)
+                            for msg in album_messages:
+                                progress_tracker.update(False)
+                            processed_albums.add(grouped_id)
+                    else:
+                        self.logger.error(f"Неожиданная ошибка копирования сообщения {message.id}: {type(e).__name__}: {e}")
+                        self.failed_messages += 1
+                        progress_tracker.update(False)
             
-            self.logger.info(f"✅ Обработано {len(all_messages)} сообщений в правильном порядке")
+            self.logger.info(f"✅ Обработано {len(all_messages)} сообщений в исходном порядке")
         
         except Exception as e:
             self.logger.error(f"Критическая ошибка при копировании: {e}")
