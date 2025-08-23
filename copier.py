@@ -775,14 +775,14 @@ class TelegramCopier:
                 self.logger.info(f"[DRY RUN] Альбом из {len(album_messages)} сообщений: {first_message.message[:50] if first_message.message else 'медиа'}")
                 return True
             
-            # ИСПРАВЛЕНИЕ: Правильная подготовка медиа для группированной отправки
-            media_files = []
-            for message in album_messages:
-                if message.media:
-                    # Для правильного альбома нужно передавать сами медиа объекты
-                    media_files.append(message.media)
+            # ИСПРАВЛЕНИЕ: Правильная подготовка альбома для группированной отправки
+            # В Telethon для альбомов нужно передавать сами сообщения, а не медиа-объекты
             
-            if not media_files:
+            # Проверяем что все сообщения имеют медиа
+            media_count = sum(1 for msg in album_messages if msg.media)
+            self.logger.debug(f"Альбом содержит {media_count} медиа из {len(album_messages)} сообщений")
+            
+            if media_count == 0:
                 self.logger.warning("Альбом не содержит медиа файлов")
                 # Если нет медиа, отправляем как обычное текстовое сообщение
                 if first_message.message:
@@ -792,23 +792,103 @@ class TelegramCopier:
             # Получаем текст из первого сообщения альбома
             caption = first_message.message or ""
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильные параметры для отправки альбома
-            send_kwargs = {
-                'entity': self.target_entity,
-                'file': media_files,  # Массив медиа файлов
-                'caption': caption,
-            }
+            # ЭКСПЕРИМЕНТАЛЬНЫЙ ПОДХОД: Пробуем два варианта отправки
+            try:
+                # Вариант 1: Передаем сами сообщения
+                self.logger.debug(f"Пробуем отправить альбом как сообщения (вариант 1)")
+                send_kwargs = {
+                    'entity': self.target_entity,
+                    'file': album_messages,  # Передаем сами сообщения
+                    'caption': caption,
+                }
+                
+                # ВАЖНО: Сохраняем форматирование текста из первого сообщения
+                if first_message.entities:
+                    send_kwargs['formatting_entities'] = first_message.entities
+                
+                self.logger.debug(f"Отправляем альбом из {len(album_messages)} сообщений")
+                
+                # Отправляем альбом
+                sent_messages = await self.client.send_file(**send_kwargs)
+                
+            except Exception as e:
+                self.logger.warning(f"Не удалось отправить альбом как сообщения: {e}")
+                
+                # Вариант 2: Извлекаем медиа-объекты и пробуем отправить их
+                self.logger.debug(f"Пробуем отправить альбом как медиа-объекты (вариант 2)")
+                media_files = []
+                for message in album_messages:
+                    if message.media:
+                        media_files.append(message.media)
+                
+                if not media_files:
+                    self.logger.error("Нет медиа файлов для отправки альбома")
+                    return False
+                
+                try:
+                    send_kwargs = {
+                        'entity': self.target_entity,
+                        'file': media_files,  # Массив медиа объектов
+                        'caption': caption,
+                    }
+                    
+                    if first_message.entities:
+                        send_kwargs['formatting_entities'] = first_message.entities
+                    
+                    # Отправляем альбом как медиа
+                    sent_messages = await self.client.send_file(**send_kwargs)
+                    
+                except Exception as e2:
+                    self.logger.warning(f"Не удалось отправить альбом как медиа-объекты: {e2}")
+                    
+                    # Вариант 3: Используем InputMedia для принудительной группировки
+                    self.logger.debug(f"Пробуем отправить альбом через InputMedia (вариант 3)")
+                    
+                    try:
+                        # Создаем InputMedia объекты для альбома
+                        input_media = []
+                        for message in album_messages:
+                            if message.media:
+                                if isinstance(message.media, MessageMediaPhoto):
+                                    input_media.append(InputMediaPhoto(message.media.photo))
+                                elif isinstance(message.media, MessageMediaDocument):
+                                    input_media.append(InputMediaDocument(message.media.document))
+                        
+                        if not input_media:
+                            self.logger.error("Не удалось создать InputMedia объекты")
+                            return False
+                        
+                        self.logger.debug(f"Создано {len(input_media)} InputMedia объектов")
+                        
+                        # Отправляем альбом через send_message с InputMedia
+                        from telethon.tl.functions.messages import SendMultiMediaRequest
+                        
+                        # Формируем запрос для отправки альбома
+                        request = SendMultiMediaRequest(
+                            peer=self.target_entity,
+                            multi_media=input_media,
+                            message=caption or "",
+                            random_id=None
+                        )
+                        
+                        result = await self.client(request)
+                        sent_messages = result.updates
+                        
+                        self.logger.info(f"Альбом отправлен через InputMedia: {len(input_media)} файлов")
+                        
+                    except Exception as e3:
+                        self.logger.error(f"Все варианты отправки альбома провалились: {e}, {e2}, {e3}")
+                        # Fallback: отправляем каждое сообщение отдельно
+                        self.logger.warning("Отправляем альбом как отдельные сообщения")
+                        success_count = 0
+                        for message in album_messages:
+                            if await self.copy_single_message(message):
+                                success_count += 1
+                        return success_count > 0
             
-            # ВАЖНО: Сохраняем форматирование текста из первого сообщения
-            if first_message.entities:
-                send_kwargs['formatting_entities'] = first_message.entities
-            
-            # Отправляем альбом как группированные медиа
-            sent_messages = await self.client.send_file(**send_kwargs)
-            
-            # sent_messages должен быть списком сообщений альбома
+            # Обрабатываем результат отправки альбома (для всех вариантов)
             if isinstance(sent_messages, list):
-                self.logger.info(f"Альбом успешно отправлен как {len(sent_messages)} сообщений")
+                self.logger.info(f"✅ Альбом успешно отправлен как {len(sent_messages)} сообщений")
                 
                 # ИСПРАВЛЕНИЕ: Обновляем трекер с реальными ID отправленных сообщений
                 if self.message_tracker and sent_messages:
@@ -816,7 +896,7 @@ class TelegramCopier:
                     target_ids = [msg.id for msg in sent_messages]
                     self.message_tracker.mark_album_copied(source_ids, target_ids)
             else:
-                self.logger.info(f"Альбом успешно отправлен как сообщение {sent_messages.id}")
+                self.logger.warning(f"⚠️ Альбом отправлен как одно сообщение {sent_messages.id} - возможна потеря группировки")
                 
                 # Если получили одно сообщение вместо альбома
                 if self.message_tracker:
@@ -847,7 +927,7 @@ class TelegramCopier:
             return False
             
         except Exception as e:
-            self.logger.error(f"Ошибка копирования альбома: {e}")
+            self.logger.error(f"Критическая ошибка копирования альбома: {e}")
             return False
     
     async def copy_single_message(self, message: Message) -> bool:
@@ -968,81 +1048,6 @@ class TelegramCopier:
         except Exception as e:
             self.logger.error(f"Ошибка копирования сообщения {message.id}: {e}")
             return False
-    
-    async def _prepare_media(self, message: Message) -> Optional[Union[str, bytes]]:
-        """
-        Подготовка медиа для отправки.
-        
-        Args:
-            message: Сообщение с медиа
-        
-        Returns:
-            Подготовленное медиа или None
-        """
-        try:
-            if isinstance(message.media, MessageMediaPhoto):
-                # Для фотографий возвращаем объект медиа напрямую
-                return message.media
-                
-            elif isinstance(message.media, MessageMediaDocument):
-                # Для документов тоже возвращаем объект медиа
-                document = message.media.document
-                
-                # Проверяем размер файла (ограничение Telegram - 50MB для ботов, 2GB для клиентов)
-                if hasattr(document, 'size') and document.size > 2 * 1024 * 1024 * 1024:  # 2GB
-                    self.logger.warning(f"Файл слишком большой: {format_file_size(document.size)}")
-                    return None
-                
-                return message.media
-                
-            elif isinstance(message.media, MessageMediaWebPage):
-                # Веб-страницы не копируем как медиа, только как текст
-                return None
-                
-            else:
-                self.logger.debug(f"Неподдерживаемый тип медиа: {type(message.media)}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Ошибка подготовки медиа: {e}")
-            return None
-    
-    async def _download_media(self, message: Message) -> Optional[str]:
-        """
-        Скачивание медиа файла (используется при необходимости).
-        
-        Args:
-            message: Сообщение с медиа
-        
-        Returns:
-            Путь к скачанному файлу или None
-        """
-        try:
-            # Создаем директорию для временных файлов
-            temp_dir = "temp_media"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            # Генерируем имя файла
-            file_name = f"message_{message.id}"
-            
-            if isinstance(message.media, MessageMediaDocument):
-                document = message.media.document
-                if hasattr(document, 'attributes'):
-                    for attr in document.attributes:
-                        if hasattr(attr, 'file_name') and attr.file_name:
-                            file_name = sanitize_filename(attr.file_name)
-                            break
-            
-            file_path = os.path.join(temp_dir, file_name)
-            
-            # Скачиваем файл
-            await self.client.download_media(message, file_path)
-            
-            return file_path
-            
-        except Exception as e:
-            self.logger.error(f"Ошибка скачивания медиа: {e}")
-            return None
     
     def cleanup_temp_files(self) -> None:
         """Очистка временных файлов."""
