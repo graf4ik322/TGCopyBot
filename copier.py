@@ -903,7 +903,7 @@ class TelegramCopier:
             for message in album_messages:
                 if message.media:
                     if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ: Для комментариев скачиваем медиа с сохранением атрибутов
+                        # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: Для комментариев скачиваем медиа с сохранением атрибутов
                         self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома с сохранением атрибутов")
                         
                         # Получаем информацию о файле из оригинального медиа
@@ -949,10 +949,15 @@ class TelegramCopier:
                         # Скачиваем файл как bytes
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
                         
-                        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Создаем объект с атрибутами для правильного отображения
+                        # ИСПРАВЛЕНИЕ: Создаем InputFile с правильными атрибутами
                         if downloaded_file and suggested_filename:
-                            # Используем кортеж (data, filename) для передачи имени файла
-                            media_files.append((downloaded_file, suggested_filename))
+                            from telethon.tl.types import InputFile
+                            from io import BytesIO
+                            
+                            # Создаем InputFile с именем файла
+                            file_like = BytesIO(downloaded_file)
+                            file_like.name = suggested_filename
+                            media_files.append(file_like)
                         else:
                             # Если не удалось определить имя файла, используем оригинальное медиа
                             media_files.append(message.media)
@@ -1080,16 +1085,19 @@ class TelegramCopier:
                 if isinstance(message.media, MessageMediaPhoto):
                     # Для фотографий
                     if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ: Для комментариев скачиваем и загружаем заново с сохранением атрибутов
+                        # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: Для комментариев скачиваем и загружаем заново с сохранением атрибутов
                         self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки с атрибутами")
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
                         
-                        # Определяем имя файла для фото
+                        # Определяем имя файла для фото и создаем BytesIO с именем
                         suggested_filename = f"photo_{message.id}.jpg"
+                        from io import BytesIO
+                        file_like = BytesIO(downloaded_file)
+                        file_like.name = suggested_filename
                         
                         file_kwargs = {
                             'entity': self.target_entity,
-                            'file': (downloaded_file, suggested_filename),  # Передаем как кортеж (data, filename)
+                            'file': file_like,  # Передаем BytesIO с именем файла
                             'caption': text,
                             'force_document': False
                         }
@@ -1152,9 +1160,14 @@ class TelegramCopier:
                         
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
                         
+                        # Создаем BytesIO с именем файла
+                        from io import BytesIO
+                        file_like = BytesIO(downloaded_file)
+                        file_like.name = suggested_filename
+                        
                         file_kwargs = {
                             'entity': self.target_entity,
-                            'file': (downloaded_file, suggested_filename),  # Передаем как кортеж (data, filename)
+                            'file': file_like,  # Передаем BytesIO с именем файла
                             'caption': text,
                             'force_document': True
                         }
@@ -1202,9 +1215,14 @@ class TelegramCopier:
                             
                             downloaded_file = await self.client.download_media(message.media, file=bytes)
                             
+                            # Создаем BytesIO с именем файла
+                            from io import BytesIO
+                            file_like = BytesIO(downloaded_file)
+                            file_like.name = suggested_filename
+                            
                             file_kwargs = {
                                 'entity': self.target_entity,
-                                'file': (downloaded_file, suggested_filename),  # Передаем как кортеж (data, filename)
+                                'file': file_like,  # Передаем BytesIO с именем файла
                                 'caption': text
                             }
                         else:
