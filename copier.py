@@ -296,6 +296,12 @@ class TelegramCopier:
         self.logger.info(f"Начинаем копирование {total_messages} сообщений")
         progress_tracker = ProgressTracker(total_messages)
         
+        # НОВОЕ: Логируем режим обработки комментариев
+        if self.flatten_structure:
+            self.logger.info("🔄 Режим антивложенности: комментарии будут обработаны как обычные посты")
+        else:
+            self.logger.info("🔗 Режим с вложенностью: комментарии сохранят связь с основными постами")
+        
         # Определяем начальную позицию
         if self.message_tracker and not resume_from_id:
             # Используем трекер для определения последнего ID
@@ -315,7 +321,8 @@ class TelegramCopier:
             iter_params = {
                 'entity': self.source_entity,
                 'reverse': True,  # От старых к новым - ключевой параметр для хронологии
-                'limit': None     # Все сообщения
+                'limit': None,    # Все сообщения
+                'replies': True   # НОВОЕ: Включаем комментарии для полной обработки
             }
             
             # Если возобновляем работу, проверяем наличие новых сообщений
@@ -366,16 +373,39 @@ class TelegramCopier:
             grouped_messages = {}  # grouped_id -> список сообщений
             processed_albums = set()  # уже обработанные альбомы
             
+            # НОВОЕ: Подсчитываем статистику типов сообщений
+            main_posts_count = 0
+            comments_count = 0
+            albums_in_comments_count = 0
+            albums_in_main_count = 0
+            
             for message in all_messages:
+                # Определяем тип сообщения
+                is_comment = hasattr(message, 'reply_to') and message.reply_to is not None
+                
+                if is_comment:
+                    comments_count += 1
+                else:
+                    main_posts_count += 1
+                
                 # Проверяем, является ли сообщение частью альбома
                 if hasattr(message, 'grouped_id') and message.grouped_id:
-                    # Это сообщение является частью альбома
                     if message.grouped_id not in grouped_messages:
                         grouped_messages[message.grouped_id] = []
+                        # Подсчитываем новые альбомы по типу
+                        if is_comment:
+                            albums_in_comments_count += 1
+                        else:
+                            albums_in_main_count += 1
                     grouped_messages[message.grouped_id].append(message)
                     self.logger.debug(f"Добавлено сообщение {message.id} в альбом {message.grouped_id}")
             
-            self.logger.info(f"Собрано {len(all_messages)} сообщений, из них альбомов: {len(grouped_messages)}")
+            self.logger.info(f"📊 Статистика сообщений:")
+            self.logger.info(f"   📌 Основных постов: {main_posts_count}")
+            self.logger.info(f"   💬 Комментариев: {comments_count}")
+            self.logger.info(f"   🎬 Альбомов в основных постах: {albums_in_main_count}")
+            self.logger.info(f"   🎬 Альбомов в комментариях: {albums_in_comments_count}")
+            self.logger.info(f"   📦 Всего альбомов: {len(grouped_messages)}")
             
             # Инициализируем трекер прогресса
             progress_tracker = ProgressTracker(total_messages)
@@ -383,6 +413,9 @@ class TelegramCopier:
             # ЭТАП 3: Обрабатываем сообщения в ИСХОДНОМ ПОРЯДКЕ
             for message in all_messages:
                 try:
+                    # НОВОЕ: Определяем тип сообщения (основное или комментарий)
+                    is_comment = hasattr(message, 'reply_to') and message.reply_to is not None
+                    
                     # Проверяем, является ли сообщение частью альбома
                     if hasattr(message, 'grouped_id') and message.grouped_id:
                         grouped_id = message.grouped_id
@@ -395,7 +428,9 @@ class TelegramCopier:
                         album_messages = grouped_messages[grouped_id]
                         album_messages.sort(key=lambda x: x.id)  # Сортируем по ID для правильного порядка
                         
-                        self.logger.info(f"🎬 Обрабатываем альбом {grouped_id} из {len(album_messages)} сообщений")
+                        # Логируем тип альбома
+                        album_type = "в комментарии" if is_comment else "основной"
+                        self.logger.info(f"🎬 Обрабатываем альбом {grouped_id} ({album_type}) из {len(album_messages)} сообщений")
                         
                         # Вычисляем общий размер альбома для мониторинга
                         total_size = 0
@@ -406,6 +441,7 @@ class TelegramCopier:
                                 total_size += len(msg.message.encode('utf-8'))
                         
                         # Копируем альбом как единое целое
+                        # В режиме flatten_structure комментарии обрабатываются как обычные посты
                         success = await self.copy_album(album_messages)
                         
                         # Обновляем статистику для всех сообщений альбома
@@ -415,7 +451,8 @@ class TelegramCopier:
                         
                         if success:
                             self.copied_messages += len(album_messages)
-                            self.logger.info(f"✅ Альбом {grouped_id} успешно скопирован")
+                            album_status = "✅ успешно скопирован" if not is_comment else "✅ успешно скопирован (комментарий)"
+                            self.logger.info(f"{album_status}: альбом {grouped_id}")
                             
                             # Записываем ID последнего сообщения альбома
                             last_album_message_id = max(msg.id for msg in album_messages)
@@ -423,7 +460,8 @@ class TelegramCopier:
                             self.logger.debug(f"Записан ID {last_album_message_id} после успешного копирования альбома")
                         else:
                             self.failed_messages += len(album_messages)
-                            self.logger.warning(f"❌ Не удалось скопировать альбом {grouped_id}")
+                            album_status = "❌ не удалось скопировать" if not is_comment else "❌ не удалось скопировать (комментарий)"
+                            self.logger.warning(f"{album_status}: альбом {grouped_id}")
                         
                         # Помечаем альбом как обработанный
                         processed_albums.add(grouped_id)
@@ -435,13 +473,21 @@ class TelegramCopier:
                                 self.rate_limiter.record_message_sent()
                     
                     else:
-                        # Обычное одиночное сообщение
+                        # Обычное одиночное сообщение (основное или комментарий)
                         # Вычисляем размер сообщения для мониторинга
                         message_size = 0
                         if message.media and hasattr(message.media, 'document') and message.media.document:
                             message_size = getattr(message.media.document, 'size', 0)
                         elif message.message:
                             message_size = len(message.message.encode('utf-8'))
+                        
+                        # Логируем тип сообщения
+                        message_type = "💬 комментарий" if is_comment else "📌 пост"
+                        if not self.flatten_structure and is_comment:
+                            # В режиме с вложенностью можно добавить специальную обработку
+                            self.logger.debug(f"Обрабатываем {message_type} {message.id} (связан с {message.reply_to})")
+                        else:
+                            self.logger.debug(f"Обрабатываем {message_type} {message.id}")
                         
                         # Копируем сообщение
                         success = await self.copy_single_message(message)
@@ -452,12 +498,14 @@ class TelegramCopier:
                         
                         if success:
                             self.copied_messages += 1
-                            self.logger.debug(f"✅ Сообщение {message.id} успешно скопировано")
+                            success_status = "✅ успешно скопировано" if not is_comment else "✅ успешно скопировано (комментарий)"
+                            self.logger.debug(f"{success_status}: сообщение {message.id}")
                             save_last_message_id(message.id, self.resume_file)
                             self.logger.debug(f"Записан ID {message.id} после успешного копирования")
                         else:
                             self.failed_messages += 1
-                            self.logger.warning(f"❌ Не удалось скопировать сообщение {message.id}")
+                            fail_status = "❌ не удалось скопировать" if not is_comment else "❌ не удалось скопировать (комментарий)"
+                            self.logger.warning(f"{fail_status}: сообщение {message.id}")
                         
                         # Соблюдаем лимиты скорости
                         if not self.dry_run:
