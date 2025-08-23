@@ -894,11 +894,21 @@ class TelegramCopier:
                 self.logger.info(f"[DRY RUN] Альбом из {len(album_messages)} сообщений: {first_message.message[:50] if first_message.message else 'медиа'}")
                 return True
             
+            # Проверяем, нужно ли скачивать медиа (для комментариев из protected chats)
+            is_from_discussion_group = hasattr(first_message, '_is_from_discussion_group') and first_message._is_from_discussion_group
+            
             # Собираем все медиа файлы из альбома
             media_files = []
             for message in album_messages:
                 if message.media:
-                    media_files.append(message.media)
+                    if is_from_discussion_group:
+                        # Для комментариев скачиваем медиа и загружаем заново
+                        self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома")
+                        downloaded_file = await self.client.download_media(message.media, file=bytes)
+                        media_files.append(downloaded_file)
+                    else:
+                        # Для основных сообщений используем прямую ссылку
+                        media_files.append(message.media)
             
             if not media_files:
                 self.logger.warning("Альбом не содержит медиа файлов")
@@ -913,7 +923,7 @@ class TelegramCopier:
             # Подготавливаем параметры для отправки альбома
             send_kwargs = {
                 'entity': self.target_entity,
-                'file': media_files,  # Массив медиа файлов
+                'file': media_files,  # Массив медиа файлов (скачанных или ссылок)
                 'caption': caption,
             }
             
@@ -1014,26 +1024,57 @@ class TelegramCopier:
             
             # Обрабатываем медиа для полного 1:1 копирования
             if message.media:
+                # Проверяем, нужно ли скачивать медиа (для protected chats)
+                is_from_discussion_group = hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group
+                
                 if isinstance(message.media, MessageMediaPhoto):
-                    # Для фотографий используем send_file с оригинальным медиа
-                    file_kwargs = {
-                        'entity': self.target_entity,
-                        'file': message.media,
-                        'caption': text,
-                        'force_document': False
-                    }
+                    # Для фотографий
+                    if is_from_discussion_group:
+                        # Для комментариев скачиваем и загружаем заново
+                        self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки")
+                        downloaded_file = await self.client.download_media(message.media, file=bytes)
+                        
+                        file_kwargs = {
+                            'entity': self.target_entity,
+                            'file': downloaded_file,
+                            'caption': text,
+                            'force_document': False
+                        }
+                    else:
+                        # Для основных сообщений используем прямую ссылку
+                        file_kwargs = {
+                            'entity': self.target_entity,
+                            'file': message.media,
+                            'caption': text,
+                            'force_document': False
+                        }
+                    
                     if message.entities:
                         file_kwargs['formatting_entities'] = message.entities
                     sent_message = await self.client.send_file(**file_kwargs)
                     
                 elif isinstance(message.media, MessageMediaDocument):
-                    # Для документов/видео/аудио используем send_file
-                    file_kwargs = {
-                        'entity': self.target_entity,
-                        'file': message.media,
-                        'caption': text,
-                        'force_document': True
-                    }
+                    # Для документов/видео/аудио
+                    if is_from_discussion_group:
+                        # Для комментариев скачиваем и загружаем заново
+                        self.logger.debug(f"Скачиваем документ из комментария {message.id} для повторной загрузки")
+                        downloaded_file = await self.client.download_media(message.media, file=bytes)
+                        
+                        file_kwargs = {
+                            'entity': self.target_entity,
+                            'file': downloaded_file,
+                            'caption': text,
+                            'force_document': True
+                        }
+                    else:
+                        # Для основных сообщений используем прямую ссылку
+                        file_kwargs = {
+                            'entity': self.target_entity,
+                            'file': message.media,
+                            'caption': text,
+                            'force_document': True
+                        }
+                    
                     if message.entities:
                         file_kwargs['formatting_entities'] = message.entities
                     sent_message = await self.client.send_file(**file_kwargs)
@@ -1043,11 +1084,24 @@ class TelegramCopier:
                 else:
                     # Для других типов медиа пытаемся отправить как есть
                     try:
-                        file_kwargs = {
-                            'entity': self.target_entity,
-                            'file': message.media,
-                            'caption': text
-                        }
+                        if is_from_discussion_group:
+                            # Для комментариев скачиваем и загружаем заново
+                            self.logger.debug(f"Скачиваем медиа типа {type(message.media)} из комментария {message.id}")
+                            downloaded_file = await self.client.download_media(message.media, file=bytes)
+                            
+                            file_kwargs = {
+                                'entity': self.target_entity,
+                                'file': downloaded_file,
+                                'caption': text
+                            }
+                        else:
+                            # Для основных сообщений используем прямую ссылку
+                            file_kwargs = {
+                                'entity': self.target_entity,
+                                'file': message.media,
+                                'caption': text
+                            }
+                        
                         if message.entities:
                             file_kwargs['formatting_entities'] = message.entities
                         sent_message = await self.client.send_file(**file_kwargs)
