@@ -973,8 +973,20 @@ class TelegramCopier:
                     return await self.copy_single_message(first_message)
                 return False
             
-            # Получаем текст из первого сообщения альбома
-            caption = first_message.message or ""
+            # ИСПРАВЛЕНИЕ: Получаем текст из ЛЮБОГО сообщения альбома, где он есть
+            caption = ""
+            caption_entities = None
+            
+            # Проверяем все сообщения альбома на наличие текста
+            for msg in album_messages:
+                if msg.message and msg.message.strip():
+                    caption = msg.message
+                    caption_entities = msg.entities
+                    self.logger.debug(f"Найден текст альбома в сообщении {msg.id}: '{caption[:50]}...'")
+                    break  # Берем первый найденный непустой текст
+            
+            if not caption:
+                self.logger.debug("Альбом без текста")
             
             # Подготавливаем параметры для отправки альбома
             send_kwargs = {
@@ -983,9 +995,9 @@ class TelegramCopier:
                 'caption': caption,
             }
             
-            # ВАЖНО: Сохраняем форматирование текста из первого сообщения
-            if first_message.entities:
-                send_kwargs['formatting_entities'] = first_message.entities
+            # ВАЖНО: Сохраняем форматирование текста из сообщения с текстом
+            if caption_entities:
+                send_kwargs['formatting_entities'] = caption_entities
             
             self.logger.debug(f"Отправляем альбом из {len(media_files)} медиа файлов")
             
@@ -1027,17 +1039,22 @@ class TelegramCopier:
             
         except MediaInvalidError as e:
             self.logger.warning(f"Медиа альбома недоступно: {e}")
-            # Пытаемся отправить только текст из первого сообщения
-            if album_messages and album_messages[0].message:
+            # Пытаемся отправить только текст из любого сообщения альбома, где он есть
+            text_message = None
+            for msg in album_messages:
+                if msg.message and msg.message.strip():
+                    text_message = msg
+                    break
+            
+            if text_message:
                 try:
-                    first_message = album_messages[0]
                     text_kwargs = {
                         'entity': self.target_entity,
-                        'message': first_message.message,
+                        'message': text_message.message,
                         'link_preview': False
                     }
-                    if first_message.entities:
-                        text_kwargs['formatting_entities'] = first_message.entities
+                    if text_message.entities:
+                        text_kwargs['formatting_entities'] = text_message.entities
                     await self.client.send_message(**text_kwargs)
                     self.logger.info(f"Отправлен только текст альбома (медиа недоступно)")
                     return True
