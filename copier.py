@@ -266,6 +266,65 @@ class TelegramCopier:
             # В случае ошибки возвращаем приблизительную оценку
             return 10000  # Достаточно большое число для прогресс-бара
     
+    async def get_all_comments_from_discussion_group(self, discussion_group_id: int) -> Dict[int, List[Message]]:
+        """
+        Получает все комментарии из discussion group и группирует их по ID постов канала.
+        
+        Args:
+            discussion_group_id: ID discussion group
+            
+        Returns:
+            Словарь {channel_post_id: [comments]}
+        """
+        comments_by_post = {}
+        
+        try:
+            discussion_group = PeerChannel(discussion_group_id)
+            self.logger.info(f"🔍 Получаем все сообщения из discussion group {discussion_group_id}")
+            
+            message_count = 0
+            forward_messages = {}  # channel_post_id -> discussion_message_id
+            all_comments = []
+            
+            # Получаем все сообщения из discussion group
+            async for disc_message in self.client.iter_messages(discussion_group, limit=None):
+                message_count += 1
+                
+                if message_count % 1000 == 0:
+                    self.logger.info(f"   📥 Обработано {message_count} сообщений из discussion group...")
+                
+                # Если это пересланное сообщение из канала
+                if (hasattr(disc_message, 'forward') and disc_message.forward and 
+                    hasattr(disc_message.forward, 'channel_post')):
+                    channel_post_id = disc_message.forward.channel_post
+                    forward_messages[channel_post_id] = disc_message.id
+                    self.logger.debug(f"Найдено пересланное сообщение: канал {channel_post_id} -> discussion {disc_message.id}")
+                
+                # Если это комментарий (reply_to существует)
+                elif hasattr(disc_message, 'reply_to') and disc_message.reply_to:
+                    all_comments.append(disc_message)
+            
+            self.logger.info(f"📊 Обработано {message_count} сообщений, найдено {len(forward_messages)} переслок и {len(all_comments)} комментариев")
+            
+            # Группируем комментарии по постам канала
+            for comment in all_comments:
+                reply_to_id = comment.reply_to.reply_to_msg_id
+                
+                # Находим, к какому посту канала относится этот комментарий
+                for channel_post_id, discussion_msg_id in forward_messages.items():
+                    if discussion_msg_id == reply_to_id:
+                        if channel_post_id not in comments_by_post:
+                            comments_by_post[channel_post_id] = []
+                        comments_by_post[channel_post_id].append(comment)
+                        break
+            
+            self.logger.info(f"✅ Комментарии сгруппированы для {len(comments_by_post)} постов")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка получения комментариев из discussion group {discussion_group_id}: {e}")
+        
+        return comments_by_post
+    
     async def get_comments_for_message(self, message: Message) -> List[Message]:
         """
         Получает комментарии для сообщения из канала через discussion group.
@@ -303,22 +362,46 @@ class TelegramCopier:
             try:
                 discussion_group = PeerChannel(discussion_group_id)
                 
-                # Получаем все комментарии из discussion group
+                # Получаем комментарии к конкретному сообщению из discussion group
                 comment_count = 0
                 
-                # Добавляем тайм-аут для предотвращения зависания на одном сообщении
+                # В discussion groups сообщения из канала дублируются с собственными ID
+                # Нужно найти дублированное сообщение и получить комментарии к нему
                 try:
-                    async for comment in self.client.iter_messages(
-                        discussion_group, 
-                        reply_to=message.id,
-                        limit=None
+                    # Сначала ищем сообщение в discussion group, которое соответствует нашему посту
+                    target_discussion_message_id = None
+                    
+                    # Ищем сообщение с forward_header, указывающим на наш пост
+                    async for disc_message in self.client.iter_messages(
+                        discussion_group,
+                        limit=50  # Ограничиваем поиск последними сообщениями
                     ):
-                        comments.append(comment)
-                        comment_count += 1
-                        
-                        # Логируем прогресс для сообщений с большим количеством комментариев
-                        if comment_count % 500 == 0:
-                            self.logger.debug(f"   📥 Сообщение {message.id}: собрано {comment_count} комментариев...")
+                        # Проверяем, есть ли forward_header
+                        if (hasattr(disc_message, 'forward') and disc_message.forward and 
+                            hasattr(disc_message.forward, 'from_id') and
+                            hasattr(disc_message.forward, 'channel_post')):
+                            
+                            # Проверяем, что это пересланное сообщение из нашего канала
+                            if disc_message.forward.channel_post == message.id:
+                                target_discussion_message_id = disc_message.id
+                                self.logger.debug(f"Найдено соответствующее сообщение в discussion group: канал {message.id} -> discussion {disc_message.id}")
+                                break
+                    
+                    if target_discussion_message_id:
+                        # Теперь получаем комментарии к найденному сообщению
+                        async for comment in self.client.iter_messages(
+                            discussion_group, 
+                            reply_to=target_discussion_message_id,
+                            limit=None
+                        ):
+                            comments.append(comment)
+                            comment_count += 1
+                            
+                            # Логируем прогресс для сообщений с большим количеством комментариев
+                            if comment_count % 500 == 0:
+                                self.logger.debug(f"   📥 Сообщение {message.id}: собрано {comment_count} комментариев...")
+                    else:
+                        self.logger.debug(f"Сообщение {message.id}: не найдено соответствующее сообщение в discussion group")
                             
                 except asyncio.TimeoutError:
                     self.logger.warning(f"Тайм-аут при сборе комментариев для сообщения {message.id} (собрано {comment_count})")
@@ -446,47 +529,52 @@ class TelegramCopier:
             if self.flatten_structure:
                 self.logger.info("🔄 Сбор комментариев из discussion groups...")
                 comments_collected = 0
-                messages_processed = 0
                 messages_with_comments = 0
                 
-                self.logger.info(f"📊 Проверяем комментарии для всех {len(all_messages)} сообщений")
+                # Определяем уникальные discussion groups
+                discussion_groups = set()
+                for message in all_messages:
+                    if (hasattr(message, 'replies') and message.replies and
+                        hasattr(message.replies, 'comments') and message.replies.comments and
+                        hasattr(message.replies, 'channel_id') and message.replies.channel_id):
+                        discussion_groups.add(message.replies.channel_id)
                 
-                for message in all_messages[:]:
-                    messages_processed += 1
+                if discussion_groups:
+                    self.logger.info(f"📊 Найдено {len(discussion_groups)} уникальных discussion groups")
                     
-                    # Быстрая предварительная проверка наличия replies
-                    if not hasattr(message, 'replies') or not message.replies:
-                        continue
-                        
-                    if not hasattr(message.replies, 'comments') or not message.replies.comments:
-                        continue
-                        
-                    # Логируем прогресс каждые 50 сообщений для лучшего контроля
-                    if messages_processed % 50 == 0:
-                        self.logger.info(f"🔍 Проверено сообщений: {messages_processed}/{len(all_messages)}, найдено комментариев: {comments_collected}")
+                    # Собираем комментарии из всех discussion groups
+                    all_comments_by_post = {}
+                    for discussion_group_id in discussion_groups:
+                        comments_by_post = await self.get_all_comments_from_discussion_group(discussion_group_id)
+                        all_comments_by_post.update(comments_by_post)
                     
-                    comments = await self.get_comments_for_message(message)
-                    if comments:
-                        messages_with_comments += 1
-                        
-                        # Помечаем комментарии специальным атрибутом для последующей идентификации
-                        for comment in comments:
-                            comment._is_from_discussion_group = True
-                            comment._parent_message_id = message.id
-                        
-                        # Добавляем комментарии к общему списку сообщений
-                        all_messages.extend(comments)
-                        comments_collected += len(comments)
-                
-                self.logger.info(f"📊 Результаты сбора комментариев:")
-                self.logger.info(f"   🔍 Проверено сообщений: {messages_processed}")
-                self.logger.info(f"   📝 Сообщений с комментариями: {messages_with_comments}")
-                self.logger.info(f"   💬 Всего собрано комментариев: {comments_collected}")
-                
-                if comments_collected > 0:
-                    self.logger.info(f"✅ Успешно собрано {comments_collected} комментариев из discussion groups")
+                    # Добавляем комментарии к соответствующим сообщениям
+                    for message in all_messages[:]:
+                        if message.id in all_comments_by_post:
+                            comments = all_comments_by_post[message.id]
+                            messages_with_comments += 1
+                            
+                            # Помечаем комментарии специальным атрибутом для последующей идентификации
+                            for comment in comments:
+                                comment._is_from_discussion_group = True
+                                comment._parent_message_id = message.id
+                            
+                            # Добавляем комментарии к общему списку сообщений
+                            all_messages.extend(comments)
+                            comments_collected += len(comments)
+                            
+                            self.logger.info(f"💬 Сообщение {message.id}: добавлено {len(comments)} комментариев")
+                    
+                    self.logger.info(f"📊 Результаты сбора комментариев:")
+                    self.logger.info(f"   📝 Сообщений с комментариями: {messages_with_comments}")
+                    self.logger.info(f"   💬 Всего собрано комментариев: {comments_collected}")
+                    
+                    if comments_collected > 0:
+                        self.logger.info(f"✅ Успешно собрано {comments_collected} комментариев из discussion groups")
+                    else:
+                        self.logger.info("ℹ️  Комментарии не найдены в discussion groups")
                 else:
-                    self.logger.info("ℹ️  Комментарии не найдены или канал не имеет discussion group")
+                    self.logger.info("ℹ️  Discussion groups не найдены или канал не имеет комментариев")
             
             # ЭТАП 1.6: Сортируем все сообщения (основные + комментарии) по хронологии
             if comments_collected > 0:
