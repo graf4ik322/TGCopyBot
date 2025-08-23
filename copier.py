@@ -949,15 +949,21 @@ class TelegramCopier:
                         # Скачиваем файл как bytes
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
                         
-                        # ИСПРАВЛЕНИЕ: Создаем InputFile с правильными атрибутами
+                        # ИСПРАВЛЕНИЕ ПРАВИЛЬНОЕ: Создаем InputFile для группированной отправки с именем
                         if downloaded_file and suggested_filename:
-                            from telethon.tl.types import InputFile
+                            from telethon.tl.types import InputFile, DocumentAttributeFilename
                             from io import BytesIO
                             
-                            # Создаем InputFile с именем файла
+                            # Создаем BytesIO объект
                             file_like = BytesIO(downloaded_file)
-                            file_like.name = suggested_filename
-                            media_files.append(file_like)
+                            
+                            # Создаем InputFile с атрибутами для правильного имени файла
+                            input_file = await self.client.upload_file(
+                                file_like, 
+                                file_name=suggested_filename,
+                                use_cache=False
+                            )
+                            media_files.append(input_file)
                         else:
                             # Если не удалось определить имя файла, используем оригинальное медиа
                             media_files.append(message.media)
