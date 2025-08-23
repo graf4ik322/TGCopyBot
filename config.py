@@ -44,7 +44,7 @@ class Config:
         self.add_debug_tags: bool = os.getenv("ADD_DEBUG_TAGS", "false").lower() == "true"
         
         # НОВОЕ: Настройка антивложенности
-        self.flatten_structure = self._get_bool('FLATTEN_STRUCTURE', False)
+        self.flatten_structure = os.getenv('FLATTEN_STRUCTURE', 'false').lower() == 'true'
         
         # Proxy settings (optional)
         self.proxy_server: Optional[str] = os.getenv('PROXY_SERVER')
