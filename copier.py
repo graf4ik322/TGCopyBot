@@ -19,7 +19,7 @@ from telethon.tl.types import (
 )
 from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
 from telethon.tl import functions
-from telethon.tl.functions.channels import GetParticipantRequest
+# from telethon.tl.functions.channels import GetParticipantRequest - убрано, используем get_permissions
 from telethon.tl.functions.messages import GetHistoryRequest
 from utils import (RateLimiter, handle_flood_wait, save_last_message_id, ProgressTracker, 
                    sanitize_filename, format_file_size, MessageDeduplicator, PerformanceMonitor)
@@ -164,14 +164,9 @@ class TelegramCopier:
                         
                         # ИСПРАВЛЕННАЯ проверка прав администратора
                         try:
-                            participant = await self.client(GetParticipantRequest(
-                                channel=self.target_entity,
-                                user_id=me.id
-                            ))
+                            permissions = await self.client.get_permissions(self.target_entity, me.id)
                             
-                            is_admin = isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator))
-                            
-                            if is_admin:
+                            if permissions.is_admin:
                                 self.logger.info("✅ Вы являетесь администратором/создателем целевого канала")
                             else:
                                 self.logger.warning("⚠️ Вы не являетесь администратором целевого канала, но продолжаем...")
@@ -465,6 +460,7 @@ class TelegramCopier:
         
         self.logger.info(f"🔄 Начинаем копирование {total_messages} сообщений в режиме антивложенности")
         self.logger.info("📋 Все комментарии будут превращены в обычные посты в хронологическом порядке")
+        self.logger.info("⚠️ ВНИМАНИЕ: Режим антивложенности может быть медленным для больших каналов")
         
         progress_tracker = ProgressTracker(total_messages)
         
@@ -511,9 +507,41 @@ class TelegramCopier:
                 
                 iter_params['min_id'] = min_id
             
-            # КЛЮЧЕВОЕ ОТЛИЧИЕ: Собираем все сообщения и комментарии в одну плоскую структуру
+            # ОПТИМИЗАЦИЯ: Сначала собираем только основные сообщения
+            self.logger.info("🔍 Собираем основные сообщения...")
+            main_messages = []
+            async for message in self.client.iter_messages(self.source_entity, reverse=True, limit=None):
+                main_messages.append(message)
+                if len(main_messages) % 1000 == 0:
+                    self.logger.info(f"📊 Собрано {len(main_messages)} основных сообщений...")
+            
+            self.logger.info(f"📊 Собрано {len(main_messages)} основных сообщений")
+            
+            # Теперь собираем комментарии для каждого сообщения
+            self.logger.info("🔍 Собираем комментарии...")
             all_messages = []
-            await self._collect_all_messages_recursively(self.source_entity, all_messages, None)
+            
+            for i, message in enumerate(main_messages):
+                all_messages.append(message)
+                
+                # Собираем комментарии к этому сообщению
+                try:
+                    async for comment in self.client.iter_messages(self.source_entity, reply_to=message.id, reverse=True, limit=None):
+                        all_messages.append(comment)
+                        
+                        # Рекурсивно собираем комментарии к комментарию (только 1 уровень для оптимизации)
+                        try:
+                            async for sub_comment in self.client.iter_messages(self.source_entity, reply_to=comment.id, reverse=True, limit=None):
+                                all_messages.append(sub_comment)
+                        except Exception:
+                            pass  # Игнорируем ошибки на глубоких уровнях
+                            
+                except Exception:
+                    pass  # Игнорируем ошибки получения комментариев
+                
+                # Показываем прогресс
+                if (i + 1) % 100 == 0:
+                    self.logger.info(f"📊 Обработано {i + 1}/{len(main_messages)} сообщений, собрано {len(all_messages)} сообщений+комментариев")
             
             # Сортируем все сообщения по ID для строгой хронологии
             all_messages.sort(key=lambda x: x.id)
@@ -522,7 +550,7 @@ class TelegramCopier:
             if min_id:
                 all_messages = [msg for msg in all_messages if msg.id > min_id]
             
-            self.logger.info(f"📊 Собрано {len(all_messages)} сообщений (включая комментарии) для плоского копирования")
+            self.logger.info(f"📊 Итого собрано {len(all_messages)} сообщений (включая комментарии) для плоского копирования")
             
             # Обрабатываем все сообщения как обычную линейную последовательность
             pending_albums = {}
