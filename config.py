@@ -29,6 +29,10 @@ class Config:
         self.source_group_id: str = os.getenv('SOURCE_GROUP_ID', '')
         self.target_group_id: str = os.getenv('TARGET_GROUP_ID', '')
         
+        # НОВОЕ: Настройки для приватных каналов с отдельными группами комментариев
+        self.discussion_group_id: str = os.getenv('DISCUSSION_GROUP_ID', '')  # ID группы с комментариями
+        self.target_discussion_group_id: str = os.getenv('TARGET_DISCUSSION_GROUP_ID', '')  # Целевая группа для комментариев
+        
         # Behavior settings
         self.delay_seconds: int = int(os.getenv('DELAY_SECONDS', '3'))
         self.messages_per_hour: int = int(os.getenv('MESSAGES_PER_HOUR', '30'))
@@ -81,6 +85,12 @@ class Config:
             ('PHONE', self.phone),
             ('SOURCE_GROUP_ID', self.source_group_id),
             ('TARGET_GROUP_ID', self.target_group_id)
+        ]
+        
+        # НОВОЕ: Дополнительная валидация для приватных каналов
+        optional_fields = [
+            ('DISCUSSION_GROUP_ID', self.discussion_group_id),
+            ('TARGET_DISCUSSION_GROUP_ID', self.target_discussion_group_id)
         ]
         
         for field_name, field_value in required_fields:
