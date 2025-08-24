@@ -468,16 +468,99 @@ class TelegramCopierV3:
     async def copy_all_messages_chronologically(self) -> bool:
         """
         Копирование всех сообщений в хронологическом порядке.
-        Сначала копируются все посты, затем все комментарии.
+        ПОРЯДОК: пост → комментарии → пост → комментарии → пост → комментарии...
         """
         try:
             self.logger.info("🚀 Начинаем копирование в хронологическом порядке...")
+            self.logger.info("📋 Порядок: пост → комментарии → пост → комментарии...")
             
-            # Этап 1: Копирование постов (включая альбомы)
-            await self._copy_all_posts()
+            # Получаем все необработанные посты в хронологическом порядке
+            cursor = self.db_connection.execute("""
+                SELECT * FROM posts 
+                WHERE processed = FALSE 
+                ORDER BY date_posted ASC
+            """)
             
-            # Этап 2: Копирование комментариев
-            await self._copy_all_comments()
+            posts_data = cursor.fetchall()
+            
+            # Группируем альбомы
+            albums = {}  # grouped_id -> [posts]
+            single_posts = []
+            
+            for post_row in posts_data:
+                grouped_id = post_row[7]  # индекс grouped_id в таблице
+                if grouped_id:
+                    if grouped_id not in albums:
+                        albums[grouped_id] = []
+                    albums[grouped_id].append(post_row)
+                else:
+                    single_posts.append(post_row)
+            
+            # Создаем единый список для обработки в хронологическом порядке
+            all_items = []
+            
+            # Добавляем одиночные посты
+            for post_row in single_posts:
+                all_items.append(('single_post', post_row))
+            
+            # Добавляем альбомы (каждый альбом как один элемент)
+            for grouped_id, album_posts in albums.items():
+                # Берем дату первого поста альбома для сортировки
+                first_post_date = album_posts[0][3]  # date_posted
+                all_items.append(('album', album_posts, first_post_date))
+            
+            # Сортируем все элементы по дате
+            all_items.sort(key=lambda x: x[2] if len(x) > 2 else x[1][3])
+            
+            self.stats.total_posts = len(single_posts)
+            self.stats.total_albums = len(albums)
+            
+            # Подсчитываем общее количество комментариев
+            cursor = self.db_connection.execute("SELECT COUNT(*) FROM comments WHERE processed = FALSE")
+            self.stats.total_comments = cursor.fetchone()[0]
+            
+            self.logger.info(f"📊 К копированию: {len(single_posts)} одиночных постов, {len(albums)} альбомов, {self.stats.total_comments} комментариев")
+            
+            # Обрабатываем элементы в хронологическом порядке
+            for item in all_items:
+                if self.stop_requested:
+                    break
+                
+                if item[0] == 'single_post':
+                    # Копируем одиночный пост
+                    post_row = item[1]
+                    post_id = post_row[0]
+                    
+                    self.logger.info(f"📝 Копируем пост {post_id}")
+                    success = await self._copy_single_post_from_db(post_row)
+                    
+                    if success:
+                        self.stats.copied_posts += 1
+                        
+                        # Сразу копируем комментарии к этому посту
+                        await self._copy_comments_for_post(post_id)
+                    else:
+                        self.stats.failed_posts += 1
+                
+                elif item[0] == 'album':
+                    # Копируем альбом
+                    album_posts = item[1]
+                    grouped_id = album_posts[0][7]
+                    
+                    self.logger.info(f"📷 Копируем альбом {grouped_id} ({len(album_posts)} сообщений)")
+                    success = await self._copy_album_from_db(album_posts)
+                    
+                    if success:
+                        self.stats.copied_albums += 1
+                        
+                        # Сразу копируем комментарии ко всем постам альбома
+                        for post_row in album_posts:
+                            post_id = post_row[0]
+                            await self._copy_comments_for_post(post_id)
+                    else:
+                        self.stats.failed_albums += 1
+                
+                await asyncio.sleep(self.delay_seconds)
             
             # Финальная статистика
             self.logger.info("🎉 Копирование завершено!")
@@ -491,6 +574,49 @@ class TelegramCopierV3:
         except Exception as e:
             self.logger.error(f"❌ Ошибка копирования: {e}")
             return False
+    
+    async def _copy_comments_for_post(self, post_id: int):
+        """
+        Копирование всех комментариев для конкретного поста.
+        
+        Args:
+            post_id: ID поста, для которого нужно скопировать комментарии
+        """
+        try:
+            if not self.target_discussion_entity:
+                return  # Нет целевой discussion group
+            
+            # Получаем все необработанные комментарии для этого поста
+            cursor = self.db_connection.execute("""
+                SELECT c.*, p.target_message_id 
+                FROM comments c
+                JOIN posts p ON c.post_id = p.id
+                WHERE c.post_id = ? AND c.processed = FALSE AND p.processed = TRUE
+                ORDER BY c.date_posted ASC
+            """, (post_id,))
+            
+            comments_data = cursor.fetchall()
+            
+            if not comments_data:
+                return  # Нет комментариев для этого поста
+            
+            self.logger.info(f"   💬 Копируем {len(comments_data)} комментариев к посту {post_id}")
+            
+            for comment_row in comments_data:
+                if self.stop_requested:
+                    break
+                
+                success = await self._copy_single_comment_from_db(comment_row)
+                if success:
+                    self.stats.copied_comments += 1
+                else:
+                    self.stats.failed_comments += 1
+                
+                # Небольшая задержка между комментариями
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка копирования комментариев для поста {post_id}: {e}")
     
     async def _copy_all_posts(self):
         """Копирование всех постов в хронологическом порядке."""
