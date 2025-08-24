@@ -901,6 +901,12 @@ class TelegramCopier:
         self.logger.info(f"🔄 Начинаем БАТЧЕВОЕ копирование {total_messages} сообщений")
         self.logger.info(f"📦 Размер батча: {self.batch_size} сообщений")
         
+        # ИСПРАВЛЕНИЕ: Логируем режим обработки комментариев (как в оригинальном методе)
+        if self.flatten_structure:
+            self.logger.info("🔄 Режим антивложенности: комментарии будут обработаны как обычные посты")
+        else:
+            self.logger.info("🔗 Режим с вложенностью: комментарии сохранят связь с основными постами")
+        
         # Определяем начальную позицию
         if self.message_tracker and not resume_from_id:
             # Используем трекер для определения последнего ID
@@ -1114,7 +1120,8 @@ class TelegramCopier:
     
     async def _process_message_batch(self, batch: List[Message], progress_tracker: ProgressTracker) -> Dict[str, int]:
         """
-        Обработка одного батча сообщений в хронологическом порядке.
+        Обрабатывает один батч сообщений в хронологическом порядке.
+        ИСПРАВЛЕНО: Добавлена обработка комментариев для сохранения полной функциональности.
         
         Args:
             batch: Батч сообщений для обработки
@@ -1125,11 +1132,50 @@ class TelegramCopier:
         """
         batch_stats = {'copied': 0, 'failed': 0, 'skipped': 0}
         
-        # Группируем альбомы в батче
+        self.logger.debug(f"🔄 Начинаем обработку батча из {len(batch)} сообщений")
+        
+        # ИСПРАВЛЕНИЕ: Собираем комментарии для сообщений в батче (если нужно)
+        batch_with_comments = []
+        
+        if self.flatten_structure:
+            self.logger.debug("💬 Режим антивложенности: собираем комментарии для сообщений в батче")
+            
+            # Собираем комментарии для каждого сообщения в батче
+            for message in batch:
+                batch_with_comments.append(message)
+                
+                # Получаем комментарии для сообщения
+                try:
+                    comments = await self.get_comments_for_message(message)
+                    if comments:
+                        self.logger.debug(f"💬 Сообщение {message.id}: найдено {len(comments)} комментариев")
+                        
+                        # Помечаем комментарии специальным атрибутом
+                        for comment in comments:
+                            comment._is_from_discussion_group = True
+                            comment._parent_message_id = message.id
+                        
+                        batch_with_comments.extend(comments)
+                    else:
+                        self.logger.debug(f"💬 Сообщение {message.id}: комментариев не найдено")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Ошибка получения комментариев для сообщения {message.id}: {e}")
+            
+            # Сортируем весь батч (сообщения + комментарии) по дате для правильной хронологии
+            batch_with_comments.sort(key=lambda msg: msg.date if hasattr(msg, 'date') and msg.date else msg.id)
+            self.logger.debug(f"📊 Батч расширен до {len(batch_with_comments)} элементов (включая комментарии)")
+            
+        else:
+            # Если режим антивложенности выключен, просто используем исходный батч
+            batch_with_comments = batch
+            self.logger.debug("🔗 Режим с вложенностью: комментарии НЕ добавляются в батч")
+        
+        # Группируем альбомы в расширенном батче
         albums = {}  # grouped_id -> список сообщений
         single_messages = []
         
-        for message in batch:
+        for message in batch_with_comments:
             if hasattr(message, 'grouped_id') and message.grouped_id:
                 if message.grouped_id not in albums:
                     albums[message.grouped_id] = []
@@ -1152,6 +1198,8 @@ class TelegramCopier:
         # Сортируем по ID для сохранения хронологии
         all_items.sort(key=lambda item: item[1].id if item[0] == 'single' else item[1][0].id)
         
+        self.logger.debug(f"📦 Обрабатываем {len(all_items)} элементов: {len(single_messages)} одиночных, {len(albums)} альбомов")
+        
         # Обрабатываем каждый элемент
         for item_type, item_data in all_items:
             try:
@@ -1159,6 +1207,15 @@ class TelegramCopier:
                 if item_type == 'single':
                     # Одиночное сообщение
                     message = item_data
+                    
+                    # ИСПРАВЛЕНИЕ: Различная обработка для комментариев и основных сообщений
+                    if hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group:
+                        # Это комментарий из discussion group
+                        self.logger.debug(f"💬 Копируем комментарий {message.id} (родительский пост: {getattr(message, '_parent_message_id', 'неизвестно')})")
+                    else:
+                        # Это основное сообщение
+                        self.logger.debug(f"📝 Копируем основное сообщение {message.id}")
+                    
                     success = await self.copy_single_message(message)
                     
                     if success:
@@ -1168,10 +1225,43 @@ class TelegramCopier:
                         batch_stats['failed'] += 1
                     
                     progress_tracker.update(success)
+                    
+                    # НОВОЕ: Рекурсивная обработка комментариев в режиме с вложенностью
+                    if not self.flatten_structure and success and not hasattr(message, '_is_from_discussion_group'):
+                        # Используем рекурсивный метод для полной обработки комментариев
+                        try:
+                            self.logger.debug(f"🔗 Запуск рекурсивной обработки комментариев для сообщения {message.id}")
+                            comments_stats = await self._process_comments_recursively(message)
+                            
+                            # Обновляем статистику батча
+                            batch_stats['copied'] += comments_stats['copied']
+                            batch_stats['failed'] += comments_stats['failed']
+                            
+                            # Обновляем трекер прогресса для всех комментариев
+                            for _ in range(comments_stats['copied'] + comments_stats['failed']):
+                                progress_tracker.update(True if comments_stats['copied'] > 0 else False)
+                            
+                            if comments_stats['copied'] > 0 or comments_stats['failed'] > 0:
+                                self.logger.debug(f"📊 Рекурсивная обработка комментариев к сообщению {message.id} завершена: "
+                                                f"скопировано {comments_stats['copied']}, ошибок {comments_stats['failed']}")
+                                        
+                        except Exception as e:
+                            self.logger.warning(f"Ошибка рекурсивной обработки комментариев для сообщения {message.id}: {e}")
                 
                 elif item_type == 'album':
                     # Альбом
                     album_messages = item_data
+                    
+                    # Проверяем, является ли это альбомом из комментариев
+                    is_comment_album = any(hasattr(msg, '_is_from_discussion_group') and msg._is_from_discussion_group 
+                                         for msg in album_messages)
+                    
+                    if is_comment_album:
+                        parent_id = getattr(album_messages[0], '_parent_message_id', 'неизвестно')
+                        self.logger.debug(f"💬 Копируем альбом-комментарий из {len(album_messages)} сообщений (родительский пост: {parent_id})")
+                    else:
+                        self.logger.debug(f"📸 Копируем основной альбом из {len(album_messages)} сообщений")
+                    
                     success = await self.copy_album(album_messages)
                     
                     if success:
@@ -1183,12 +1273,35 @@ class TelegramCopier:
                     
                     for msg in album_messages:
                         progress_tracker.update(success)
+                    
+                    # НОВОЕ: Рекурсивная обработка комментариев к альбому в режиме с вложенностью
+                    if not self.flatten_structure and success and not is_comment_album:
+                        # Обрабатываем комментарии к альбому (берем первое сообщение альбома как представитель)
+                        representative_message = album_messages[0]
+                        try:
+                            self.logger.debug(f"🔗 Запуск рекурсивной обработки комментариев для альбома {representative_message.grouped_id}")
+                            comments_stats = await self._process_comments_recursively(representative_message)
+                            
+                            # Обновляем статистику батча
+                            batch_stats['copied'] += comments_stats['copied']
+                            batch_stats['failed'] += comments_stats['failed']
+                            
+                            # Обновляем трекер прогресса для всех комментариев
+                            for _ in range(comments_stats['copied'] + comments_stats['failed']):
+                                progress_tracker.update(True if comments_stats['copied'] > 0 else False)
+                            
+                            if comments_stats['copied'] > 0 or comments_stats['failed'] > 0:
+                                self.logger.debug(f"📊 Рекурсивная обработка комментариев к альбому {representative_message.grouped_id} завершена: "
+                                                f"скопировано {comments_stats['copied']}, ошибок {comments_stats['failed']}")
+                                        
+                        except Exception as e:
+                            self.logger.warning(f"Ошибка рекурсивной обработки комментариев для альбома {representative_message.grouped_id}: {e}")
                 
                 # Соблюдаем лимиты скорости
                 if not self.dry_run and success:
                     await self.rate_limiter.wait_if_needed()
                     self.rate_limiter.record_message_sent()
-                
+            
             except FloodWaitError as e:
                 await handle_flood_wait(e, self.logger)
                 # Повторяем попытку для текущего элемента
@@ -1225,6 +1338,76 @@ class TelegramCopier:
         # Небольшая пауза для системы
         await asyncio.sleep(0.1)
 
+    async def _process_comments_recursively(self, parent_message: Message, depth: int = 0, 
+                                          max_depth: int = 10) -> Dict[str, int]:
+        """
+        ИСПРАВЛЕНИЕ: Рекурсивная обработка комментариев для восстановления полной функциональности.
+        Обрабатывает комментарии к сообщению и комментарии к комментариям (любой уровень вложенности).
+        
+        Args:
+            parent_message: Сообщение, для которого обрабатываем комментарии
+            depth: Текущий уровень глубины (для предотвращения бесконечной рекурсии)
+            max_depth: Максимальная глубина рекурсии
+            
+        Returns:
+            Статистика обработки комментариев
+        """
+        comments_stats = {'copied': 0, 'failed': 0}
+        
+        if depth >= max_depth:
+            self.logger.warning(f"Достигнута максимальная глубина рекурсии {max_depth} для комментариев")
+            return comments_stats
+        
+        try:
+            # Получаем комментарии к родительскому сообщению
+            comments = await self.get_comments_for_message(parent_message)
+            
+            if not comments:
+                self.logger.debug(f"{'  ' * depth}💬 Сообщение {parent_message.id}: комментариев не найдено (глубина {depth})")
+                return comments_stats
+            
+            self.logger.debug(f"{'  ' * depth}🔗 Обрабатываем {len(comments)} комментариев к сообщению {parent_message.id} (глубина {depth})")
+            
+            # Сортируем комментарии по дате для сохранения хронологии
+            comments.sort(key=lambda c: c.date if hasattr(c, 'date') and c.date else c.id)
+            
+            for comment in comments:
+                try:
+                    # Копируем комментарий
+                    self.logger.debug(f"{'  ' * depth}💬 Копируем комментарий {comment.id} (глубина {depth})")
+                    comment_success = await self.copy_single_message(comment)
+                    
+                    if comment_success:
+                        comments_stats['copied'] += 1
+                        self.logger.debug(f"{'  ' * depth}✅ Комментарий {comment.id} скопирован")
+                        
+                        # Рекурсивно обрабатываем комментарии к этому комментарию
+                        nested_stats = await self._process_comments_recursively(comment, depth + 1, max_depth)
+                        comments_stats['copied'] += nested_stats['copied']
+                        comments_stats['failed'] += nested_stats['failed']
+                        
+                    else:
+                        comments_stats['failed'] += 1
+                        self.logger.debug(f"{'  ' * depth}❌ Ошибка копирования комментария {comment.id}")
+                    
+                    # Соблюдаем лимиты скорости
+                    if not self.dry_run and comment_success:
+                        await self.rate_limiter.wait_if_needed()
+                        self.rate_limiter.record_message_sent()
+                        
+                except Exception as comment_error:
+                    self.logger.error(f"{'  ' * depth}Ошибка обработки комментария {comment.id}: {comment_error}")
+                    comments_stats['failed'] += 1
+                    
+        except Exception as e:
+            self.logger.warning(f"{'  ' * depth}Ошибка получения комментариев для сообщения {parent_message.id} (глубина {depth}): {e}")
+        
+        if comments_stats['copied'] > 0 or comments_stats['failed'] > 0:
+            self.logger.debug(f"{'  ' * depth}📊 Обработка комментариев завершена (глубина {depth}): "
+                            f"скопировано {comments_stats['copied']}, ошибок {comments_stats['failed']}")
+        
+        return comments_stats
+    
     async def get_target_messages_count(self) -> int:
         """
         Получение количества сообщений в целевом канале для проверки.
