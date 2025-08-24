@@ -49,6 +49,9 @@ class Config:
         # НОВОЕ: Настройка антивложенности
         self.flatten_structure = os.getenv('FLATTEN_STRUCTURE', 'false').lower() == 'true'
         
+        # ИСПРАВЛЕНИЕ: Размер батча для предотвращения проблем с памятью
+        self.batch_size: int = int(os.getenv('BATCH_SIZE', '100'))
+        
         # Proxy settings (optional)
         self.proxy_server: Optional[str] = os.getenv('PROXY_SERVER')
         # ИСПРАВЛЕНИЕ: Безопасное преобразование PROXY_PORT

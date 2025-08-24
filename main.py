@@ -351,7 +351,8 @@ class TelegramCopierApp:
                 tracker_file=getattr(self.config, 'tracker_file', 'copied_messages.json'),
                 add_debug_tags=getattr(self.config, 'add_debug_tags', False),
                 flatten_structure=getattr(self.config, 'flatten_structure', False),
-                debug_message_ids=getattr(self.config, 'debug_message_ids', False)
+                debug_message_ids=getattr(self.config, 'debug_message_ids', False),
+                batch_size=getattr(self.config, 'batch_size', 100)
             )
             
             # Проверяем, нужно ли возобновить с определенного места
@@ -359,9 +360,15 @@ class TelegramCopierApp:
             if resume_from_id:
                 self.logger.info(f"Возобновляем копирование с сообщения ID: {resume_from_id}")
             
-            # Запускаем копирование
+            # Запускаем батчевое копирование (ИСПРАВЛЕНИЕ: предотвращает проблемы с памятью)
             self.running = True
-            stats = await self.copier.copy_all_messages(resume_from_id)
+            if hasattr(self.copier, 'copy_all_messages_batch'):
+                self.logger.info("🔧 Используется батчевая обработка для предотвращения проблем с памятью")
+                stats = await self.copier.copy_all_messages_batch(resume_from_id)
+            else:
+                # Fallback на старый метод, если новый недоступен
+                self.logger.warning("⚠️ Батчевая обработка недоступна, используется обычный метод")
+                stats = await self.copier.copy_all_messages(resume_from_id)
             
             # Очищаем временные файлы
             if self.copier:
@@ -414,6 +421,11 @@ class TelegramCopierApp:
                     self.logger.info(f"Скопировано: {stats.get('copied_messages', 0)}")
                     self.logger.info(f"Ошибок: {stats.get('failed_messages', 0)}")
                     self.logger.info(f"Пропущено: {stats.get('skipped_messages', 0)}")
+                    
+                    # Показываем информацию о батчах, если доступна
+                    if 'batches_processed' in stats:
+                        self.logger.info(f"📦 Обработано батчей: {stats['batches_processed']}")
+                        self.logger.info(f"📏 Размер батча: {stats.get('batch_size', 100)}")
                     
                     # Показываем проверку целевого канала, если доступна
                     if 'target_messages_count' in stats:
