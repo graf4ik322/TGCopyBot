@@ -67,7 +67,8 @@ class TelegramCopierV3:
                  target_channel_id: Union[int, str],
                  database_path: str = "telegram_copier_v3.db",
                  dry_run: bool = False,
-                 delay_seconds: int = 3):
+                 delay_seconds: int = 3,
+                 flatten_structure: bool = False):
         """
         Инициализация копировщика.
         
@@ -78,6 +79,7 @@ class TelegramCopierV3:
             database_path: Путь к файлу базы данных
             dry_run: Режим симуляции без реальной отправки
             delay_seconds: Задержка между отправками сообщений
+            flatten_structure: Режим антивложенности - комментарии как обычные посты
         """
         self.client = client
         self.source_channel_id = source_channel_id
@@ -85,8 +87,13 @@ class TelegramCopierV3:
         self.database_path = database_path
         self.dry_run = dry_run
         self.delay_seconds = delay_seconds
+        self.flatten_structure = flatten_structure
         
         self.logger = logging.getLogger('telegram_copier_v3')
+        
+        # Логируем режим антивложенности
+        if self.flatten_structure:
+            self.logger.info("🔄 Включен режим антивложенности - комментарии будут превращены в обычные посты")
         
         # Кэш для entities
         self.source_entity = None
@@ -578,13 +585,15 @@ class TelegramCopierV3:
     async def _copy_comments_for_post(self, post_id: int):
         """
         Копирование всех комментариев для конкретного поста.
+        В режиме flatten_structure комментарии отправляются как обычные посты в основной канал.
         
         Args:
             post_id: ID поста, для которого нужно скопировать комментарии
         """
         try:
-            if not self.target_discussion_entity:
-                return  # Нет целевой discussion group
+            # В режиме антивложенности не нужна discussion group
+            if not self.flatten_structure and not self.target_discussion_entity:
+                return  # Нет целевой discussion group и не включен режим антивложенности
             
             # Получаем все необработанные комментарии для этого поста
             cursor = self.db_connection.execute("""
@@ -600,7 +609,10 @@ class TelegramCopierV3:
             if not comments_data:
                 return  # Нет комментариев для этого поста
             
-            self.logger.info(f"   💬 Копируем {len(comments_data)} комментариев к посту {post_id}")
+            if self.flatten_structure:
+                self.logger.info(f"   💬 Копируем {len(comments_data)} комментариев к посту {post_id} КАК ОБЫЧНЫЕ ПОСТЫ (режим антивложенности)")
+            else:
+                self.logger.info(f"   💬 Копируем {len(comments_data)} комментариев к посту {post_id}")
             
             for comment_row in comments_data:
                 if self.stop_requested:
@@ -833,7 +845,10 @@ class TelegramCopierV3:
             self.logger.error(f"❌ Ошибка копирования комментариев: {e}")
     
     async def _copy_single_comment_from_db(self, comment_row: tuple) -> bool:
-        """Копирование одиночного комментария из данных БД."""
+        """
+        Копирование одиночного комментария из данных БД.
+        В режиме flatten_structure комментарии отправляются как обычные посты в основной канал.
+        """
         try:
             comment_id = comment_row[0]
             comment_text = comment_row[3] or ''
@@ -843,17 +858,32 @@ class TelegramCopierV3:
             target_post_id = comment_row[-1]  # target_message_id из JOIN
             
             if self.dry_run:
-                self.logger.info(f"🔧 [DRY RUN] Комментарий {comment_id}: {comment_text[:50]}...")
+                mode_text = "КАК ОБЫЧНЫЙ ПОСТ" if self.flatten_structure else "как комментарий"
+                self.logger.info(f"🔧 [DRY RUN] Комментарий {comment_id} {mode_text}: {comment_text[:50]}...")
                 self._mark_comment_processed(comment_id, 999999)
                 return True
             
-            # Подготовка параметров отправки
-            send_kwargs = {
-                'entity': self.target_discussion_entity,
-                'message': comment_text,
-                'formatting_entities': self._restore_entities(entities_data),
-                'reply_to': target_post_id  # Отвечаем на соответствующий пост
-            }
+            # Выбираем целевую сущность в зависимости от режима
+            if self.flatten_structure:
+                # В режиме антивложенности отправляем в основной канал как обычный пост
+                target_entity = self.target_entity
+                send_kwargs = {
+                    'entity': target_entity,
+                    'message': comment_text,
+                    'formatting_entities': self._restore_entities(entities_data),
+                    # НЕ добавляем reply_to - это обычный пост
+                }
+                self.logger.debug(f"📝 Отправляем комментарий {comment_id} как обычный пост в основной канал")
+            else:
+                # Обычный режим - отправляем в discussion group как комментарий
+                target_entity = self.target_discussion_entity
+                send_kwargs = {
+                    'entity': target_entity,
+                    'message': comment_text,
+                    'formatting_entities': self._restore_entities(entities_data),
+                    'reply_to': target_post_id  # Отвечаем на соответствующий пост
+                }
+                self.logger.debug(f"💬 Отправляем комментарий {comment_id} как ответ на пост {target_post_id}")
             
             # Обработка медиа
             if media_type and media_data:
@@ -869,7 +899,10 @@ class TelegramCopierV3:
             # Отметка как обработанного
             self._mark_comment_processed(comment_id, sent_message.id)
             
-            self.logger.debug(f"✅ Комментарий {comment_id} -> {sent_message.id}")
+            if self.flatten_structure:
+                self.logger.debug(f"✅ Комментарий {comment_id} -> обычный пост {sent_message.id}")
+            else:
+                self.logger.debug(f"✅ Комментарий {comment_id} -> ответ {sent_message.id}")
             return True
             
         except Exception as e:

@@ -126,7 +126,8 @@ class TelegramCopierAppV3:
                 target_channel_id=self.config.target_group_id,
                 database_path="telegram_copier_v3.db",
                 dry_run=self.config.dry_run,
-                delay_seconds=self.config.delay_seconds
+                delay_seconds=self.config.delay_seconds,
+                flatten_structure=self.config.flatten_structure
             )
             
             # Инициализация копировщика
