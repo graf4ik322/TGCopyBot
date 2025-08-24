@@ -2,6 +2,12 @@
 """
 Главный модуль Telegram копировщика постов.
 Обеспечивает авторизацию, инициализацию и запуск процесса копирования.
+
+ВЕРСИЯ: 2.1 - Интегрированы критические исправления:
+- ✅ Исправлена проблема с MediaProxy ("Cannot use None as file")
+- ✅ Исправлено копирование комментариев при перезапуске
+- ✅ Добавлена поддержка приватных каналов с отдельными группами комментариев
+- ✅ Улучшена статистика и диагностика
 """
 
 import asyncio
@@ -16,6 +22,7 @@ from config import Config
 from utils import setup_logging, RateLimiter, load_last_message_id, ProcessLock
 from copier import TelegramCopier
 from memory_optimization_patch import apply_memory_optimization
+from fix_private_channel_comments import apply_private_channel_patch
 
 
 class TelegramCopierApp:
@@ -356,6 +363,9 @@ class TelegramCopierApp:
                 batch_size=getattr(self.config, 'batch_size', 100)
             )
             
+            # КРИТИЧЕСКИ ВАЖНО: Передаем конфигурацию копировщику
+            self.copier.config = self.config
+            
             # НОВОЕ: Применяем оптимизацию памяти
             if getattr(self.config, 'enable_memory_optimization', True):
                 memory_limit = getattr(self.config, 'memory_limit_mb', 100)
@@ -363,6 +373,10 @@ class TelegramCopierApp:
                 apply_memory_optimization(self.copier, memory_limit)
             else:
                 self.logger.info("⚠️ Оптимизация памяти отключена в конфигурации")
+            
+            # КРИТИЧЕСКИ ВАЖНО: Применяем патчи для приватных каналов
+            self.logger.info("🔧 Применяем исправления для приватных каналов и комментариев...")
+            apply_private_channel_patch(self.copier)
             
             # Проверяем, нужно ли возобновить с определенного места
             resume_from_id = load_last_message_id(self.config.resume_file)
@@ -439,6 +453,12 @@ class TelegramCopierApp:
                     # Показываем проверку целевого канала, если доступна
                     if 'target_messages_count' in stats:
                         self.logger.info(f"📊 В целевом канале: {stats['target_messages_count']} сообщений")
+                    
+                    # НОВОЕ: Показываем статистику комментариев
+                    if hasattr(self.copier, 'comments_cache') and self.copier.comments_cache:
+                        total_comments = sum(len(comments) for comments in self.copier.comments_cache.values())
+                        posts_with_comments = len(self.copier.comments_cache)
+                        self.logger.info(f"💬 Обработано комментариев: {total_comments} для {posts_with_comments} постов")
                     
                     self.logger.info(f"Время выполнения: {stats.get('elapsed_time', 0):.1f} сек")
                     self.logger.info(f"Скорость: {stats.get('messages_per_minute', 0):.1f} сообщений/мин")
