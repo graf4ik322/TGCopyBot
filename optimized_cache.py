@@ -19,6 +19,77 @@ import os
 from telethon.tl.types import Message
 
 
+def message_to_dict(message: Message) -> Dict[str, Any]:
+    """
+    Конвертирует Telethon Message в сериализуемый словарь.
+    Убирает ссылки на клиент и другие несериализуемые объекты.
+    """
+    try:
+        # Основные поля сообщения
+        msg_dict = {
+            'id': message.id,
+            'date': message.date.isoformat() if message.date else None,
+            'message': message.message or '',
+            'from_id': getattr(message.from_id, 'user_id', None) if message.from_id else None,
+            'to_id': getattr(message.peer_id, 'channel_id', None) if message.peer_id else None,
+            'reply_to_msg_id': message.reply_to_msg_id,
+            'entities': [],
+            'media_type': None,
+            'grouped_id': getattr(message, 'grouped_id', None),
+            'views': getattr(message, 'views', None),
+            'forwards': getattr(message, 'forwards', None),
+        }
+        
+        # Сериализуем entities безопасно
+        if hasattr(message, 'entities') and message.entities:
+            for entity in message.entities:
+                try:
+                    entity_dict = {
+                        'type': entity.__class__.__name__,
+                        'offset': entity.offset,
+                        'length': entity.length,
+                    }
+                    # Добавляем специфичные поля для разных типов entities
+                    if hasattr(entity, 'url'):
+                        entity_dict['url'] = entity.url
+                    if hasattr(entity, 'user_id'):
+                        entity_dict['user_id'] = entity.user_id
+                    msg_dict['entities'].append(entity_dict)
+                except Exception:
+                    continue  # Пропускаем проблемные entities
+        
+        # Определяем тип медиа без сериализации самого объекта
+        if hasattr(message, 'media') and message.media:
+            msg_dict['media_type'] = message.media.__class__.__name__
+        
+        return msg_dict
+        
+    except Exception as e:
+        # Fallback - минимальная информация
+        return {
+            'id': getattr(message, 'id', 0),
+            'date': None,
+            'message': getattr(message, 'message', '') or '',
+            'from_id': None,
+            'to_id': None,
+            'reply_to_msg_id': getattr(message, 'reply_to_msg_id', None),
+            'entities': [],
+            'media_type': None,
+            'grouped_id': None,
+            'views': None,
+            'forwards': None,
+            'error': str(e)
+        }
+
+
+def dict_to_message_info(msg_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Возвращает информацию о сообщении из словаря.
+    Не создает полноценный Message объект, а возвращает данные для работы.
+    """
+    return msg_dict
+
+
 @dataclass
 class MemoryStats:
     """Статистика использования памяти."""
