@@ -82,12 +82,52 @@ def message_to_dict(message: Message) -> Dict[str, Any]:
         }
 
 
-def dict_to_message_info(msg_dict: Dict[str, Any]) -> Dict[str, Any]:
+class MessageProxy:
     """
-    Возвращает информацию о сообщении из словаря.
-    Не создает полноценный Message объект, а возвращает данные для работы.
+    Легкий объект-прокси для замены Telethon Message.
+    Содержит только необходимые данные без ссылок на клиент.
     """
-    return msg_dict
+    def __init__(self, msg_dict: Dict[str, Any]):
+        self.id = msg_dict.get('id', 0)
+        self.message = msg_dict.get('message', '')
+        self.from_id = msg_dict.get('from_id')
+        self.to_id = msg_dict.get('to_id')
+        self.reply_to_msg_id = msg_dict.get('reply_to_msg_id')
+        self.grouped_id = msg_dict.get('grouped_id')
+        self.views = msg_dict.get('views')
+        self.forwards = msg_dict.get('forwards')
+        self.media_type = msg_dict.get('media_type')
+        
+        # Парсим дату
+        try:
+            from datetime import datetime
+            if msg_dict.get('date'):
+                self.date = datetime.fromisoformat(msg_dict['date'])
+            else:
+                # Fallback - используем ID как timestamp
+                self.date = datetime.fromtimestamp(self.id) if self.id > 1000000000 else None
+        except:
+            self.date = None
+        
+        # Флаги для совместимости с основным кодом
+        self._is_from_discussion_group = False
+        self._parent_message_id = None
+        
+        # Сохраняем оригинальные данные
+        self._original_data = msg_dict
+    
+    def __str__(self):
+        return f"MessageProxy(id={self.id}, message='{self.message[:50]}...')"
+    
+    def __repr__(self):
+        return self.__str__()
+
+
+def dict_to_message_proxy(msg_dict: Dict[str, Any]) -> MessageProxy:
+    """
+    Конвертирует словарь в MessageProxy объект.
+    """
+    return MessageProxy(msg_dict)
 
 
 @dataclass
@@ -107,8 +147,8 @@ class LRUCache:
         self.cache = OrderedDict()
         self.lock = threading.RLock()
     
-    def get(self, key: int) -> Optional[List[Message]]:
-        """Получить значение из кэша."""
+    def get(self, key: int) -> Optional[List[Dict[str, Any]]]:
+        """Получить значение из кэша (возвращает словари для дальнейшей конвертации)."""
         with self.lock:
             if key in self.cache:
                 # Перемещаем в конец (most recently used)
@@ -117,7 +157,7 @@ class LRUCache:
                 return value
             return None
     
-    def put(self, key: int, value: List[Message]) -> None:
+    def put(self, key: int, value: List[Dict[str, Any]]) -> None:
         """Добавить значение в кэш."""
         with self.lock:
             if key in self.cache:
@@ -229,25 +269,42 @@ class OptimizedCommentsStorage:
             # Подготавливаем данные для вставки
             insert_data = []
             for post_id, comments in comments_by_post.items():
-                # Сериализуем комментарии в бинарный формат
-                comments_blob = pickle.dumps(comments)
-                insert_data.append((post_id, comments_blob))
+                # Конвертируем Telethon Message объекты в сериализуемые словари
+                comments_dicts = []
+                for comment in comments:
+                    try:
+                        comment_dict = message_to_dict(comment)
+                        comments_dicts.append(comment_dict)
+                    except Exception as e:
+                        self.logger.warning(f"Не удалось сериализовать комментарий {getattr(comment, 'id', 'unknown')}: {e}")
+                        continue
+                
+                if comments_dicts:  # Только если есть успешно сериализованные комментарии
+                    # Сериализуем в JSON
+                    comments_json = json.dumps(comments_dicts, ensure_ascii=False)
+                    insert_data.append((post_id, comments_json))
             
-            # Батчевая вставка
-            self.connection.executemany("""
-                INSERT OR REPLACE INTO comments (post_id, comments_data) 
-                VALUES (?, ?)
-            """, insert_data)
-            
-            self.connection.commit()
-            self.stats['db_writes'] += len(insert_data)
-            
-            self.logger.info(f"💾 Сохранено {len(insert_data)} связей пост->комментарии в базу данных")
+            if insert_data:
+                # Батчевая вставка
+                self.connection.executemany("""
+                    INSERT OR REPLACE INTO comments (post_id, comments_data) 
+                    VALUES (?, ?)
+                """, insert_data)
+                
+                self.connection.commit()
+                self.stats['db_writes'] += len(insert_data)
+                
+                total_comments = sum(len(json.loads(data[1])) for data in insert_data)
+                self.logger.info(f"💾 Сохранено {len(insert_data)} связей пост->комментарии в базу данных ({total_comments} комментариев)")
+            else:
+                self.logger.warning("⚠️ Нет данных для сохранения после сериализации")
             
         except Exception as e:
             self.logger.error(f"❌ Ошибка сохранения комментариев в базу: {e}")
+            import traceback
+            self.logger.error(f"Детали ошибки: {traceback.format_exc()}")
     
-    async def get_comments_for_post(self, post_id: int) -> List[Message]:
+    async def get_comments_for_post(self, post_id: int) -> List[MessageProxy]:
         """
         Получить комментарии для поста с использованием многоуровневого кэширования.
         
@@ -255,14 +312,15 @@ class OptimizedCommentsStorage:
             post_id: ID поста канала
             
         Returns:
-            Список комментариев
+            Список MessageProxy объектов (совместимые с Message, но без ссылок на клиент)
         """
         # Уровень 1: Проверяем LRU кэш в памяти
         cached_comments = self.lru_cache.get(post_id)
         if cached_comments is not None:
             self.stats['cache_hits'] += 1
             self.logger.debug(f"💨 Кэш-попадание для поста {post_id}: {len(cached_comments)} комментариев")
-            return cached_comments
+            # Конвертируем словари в MessageProxy объекты
+            return [dict_to_message_proxy(comment_dict) for comment_dict in cached_comments]
         
         # Уровень 2: Читаем из SQLite базы данных
         try:
@@ -276,11 +334,11 @@ class OptimizedCommentsStorage:
             
             row = cursor.fetchone()
             if row:
-                # Десериализуем комментарии
-                comments = pickle.loads(row[0])
+                # Десериализуем комментарии из JSON
+                comments_dicts = json.loads(row[0])
                 
-                # Добавляем в LRU кэш для будущих запросов
-                self.lru_cache.put(post_id, comments)
+                # Добавляем в LRU кэш для будущих запросов (как словари)
+                self.lru_cache.put(post_id, comments_dicts)
                 
                 # Обновляем статистику доступа
                 self.connection.execute("""
@@ -290,8 +348,11 @@ class OptimizedCommentsStorage:
                 """, (post_id,))
                 self.connection.commit()
                 
-                self.logger.debug(f"💾 Загружено из БД для поста {post_id}: {len(comments)} комментариев")
-                return comments
+                # Конвертируем в MessageProxy объекты для возврата
+                message_proxies = [dict_to_message_proxy(comment_dict) for comment_dict in comments_dicts]
+                
+                self.logger.debug(f"💾 Загружено из БД для поста {post_id}: {len(message_proxies)} комментариев")
+                return message_proxies
             else:
                 # Комментариев нет
                 empty_list = []
@@ -300,6 +361,8 @@ class OptimizedCommentsStorage:
                 
         except Exception as e:
             self.logger.error(f"❌ Ошибка чтения комментариев для поста {post_id}: {e}")
+            import traceback
+            self.logger.error(f"Детали ошибки: {traceback.format_exc()}")
             return []
     
     async def preload_comments_optimized(self, sample_batch: List[Message], 

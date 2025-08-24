@@ -31,7 +31,12 @@ def apply_memory_optimization(copier_instance, memory_limit_mb=100):
     # Заменяем методы на оптимизированные
     async def optimized_get_comments_from_cache(message):
         """Оптимизированное получение комментариев."""
-        return await copier_instance.optimized_storage.get_comments_for_post(message.id)
+        # Получаем MessageProxy объекты из оптимизированного хранилища
+        # Они совместимы с оригинальными Message объектами по API
+        message_proxies = await copier_instance.optimized_storage.get_comments_for_post(message.id)
+        
+        # MessageProxy объекты уже совместимы с оригинальным кодом
+        return message_proxies
     
     async def optimized_preload_all_comments_cache(sample_batch):
         """Оптимизированная предзагрузка комментариев."""
