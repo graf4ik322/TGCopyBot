@@ -58,9 +58,31 @@ def message_to_dict(message: Message) -> Dict[str, Any]:
                 except Exception:
                     continue  # Пропускаем проблемные entities
         
-        # Определяем тип медиа без сериализации самого объекта
+        # Определяем тип медиа и сохраняем основную информацию
         if hasattr(message, 'media') and message.media:
             msg_dict['media_type'] = message.media.__class__.__name__
+            msg_dict['has_media'] = True
+            
+            # Сохраняем дополнительную информацию о медиа для восстановления
+            if hasattr(message.media, 'document') and message.media.document:
+                msg_dict['media_info'] = {
+                    'type': 'document',
+                    'mime_type': getattr(message.media.document, 'mime_type', ''),
+                    'size': getattr(message.media.document, 'size', 0),
+                    'id': getattr(message.media.document, 'id', 0)
+                }
+            elif hasattr(message.media, 'photo') and message.media.photo:
+                msg_dict['media_info'] = {
+                    'type': 'photo',
+                    'id': getattr(message.media.photo, 'id', 0)
+                }
+            else:
+                msg_dict['media_info'] = {
+                    'type': 'other'
+                }
+        else:
+            msg_dict['has_media'] = False
+            msg_dict['media_info'] = None
         
         return msg_dict
         
@@ -98,6 +120,31 @@ class MessageProxy:
         self.forwards = msg_dict.get('forwards')
         self.media_type = msg_dict.get('media_type')
         
+        # КРИТИЧЕСКИ ВАЖНЫЕ атрибуты для совместимости
+        self.media = self._create_media_proxy(msg_dict) if msg_dict.get('has_media') else None
+        self.entities = self._parse_entities(msg_dict.get('entities', []))
+        self.file = None  # Для совместимости с file operations
+        self.photo = None  # Для фото сообщений
+        self.document = None  # Для документов
+        self.video = None  # Для видео
+        self.audio = None  # Для аудио
+        self.voice = None  # Для голосовых
+        self.sticker = None  # Для стикеров
+        self.gif = None  # Для GIF
+        self.contact = None  # Для контактов
+        self.geo = None  # Для геолокации
+        self.invoice = None  # Для счетов
+        self.web_page = None  # Для веб-страниц
+        
+        # Дополнительные атрибуты для полной совместимости
+        self.edit_date = None
+        self.post_author = msg_dict.get('post_author')
+        self.via_bot_id = msg_dict.get('via_bot_id')
+        self.restriction_reason = msg_dict.get('restriction_reason')
+        self.reply_markup = None
+        self.reactions = None
+        self.replies = None
+        
         # Парсим дату
         try:
             from datetime import datetime
@@ -115,6 +162,91 @@ class MessageProxy:
         
         # Сохраняем оригинальные данные
         self._original_data = msg_dict
+    
+    def _parse_entities(self, entities_list):
+        """Парсим entities из сериализованного формата."""
+        if not entities_list:
+            return []
+        
+        # Создаем простые объекты-заглушки для entities
+        parsed_entities = []
+        for entity_dict in entities_list:
+            try:
+                # Создаем простой объект с необходимыми атрибутами
+                class EntityProxy:
+                    def __init__(self, data):
+                        self.offset = data.get('offset', 0)
+                        self.length = data.get('length', 0)
+                        self.url = data.get('url')
+                        self.user_id = data.get('user_id')
+                        self._type = data.get('type', 'Unknown')
+                    
+                    def __str__(self):
+                        return f"EntityProxy({self._type})"
+                
+                parsed_entities.append(EntityProxy(entity_dict))
+            except:
+                continue  # Пропускаем проблемные entities
+        
+        return parsed_entities
+    
+    def _create_media_proxy(self, msg_dict):
+        """Создает простой объект-прокси для медиа."""
+        if not msg_dict.get('has_media'):
+            return None
+        
+        # Создаем простой объект-заглушку для медиа
+        class MediaProxy:
+            def __init__(self, media_info, media_type):
+                self.media_type = media_type
+                self.info = media_info or {}
+                
+                # Создаем заглушки для основных атрибутов
+                if self.info.get('type') == 'document':
+                    self.document = self._create_document_proxy()
+                    self.photo = None
+                elif self.info.get('type') == 'photo':
+                    self.photo = self._create_photo_proxy()
+                    self.document = None
+                else:
+                    self.document = None
+                    self.photo = None
+            
+            def _create_document_proxy(self):
+                """Создает заглушку для document."""
+                class DocumentProxy:
+                    def __init__(self, info):
+                        self.mime_type = info.get('mime_type', '')
+                        self.size = info.get('size', 0)
+                        self.id = info.get('id', 0)
+                        # ВАЖНО: основной код может проверять этот атрибут
+                        self.attributes = []
+                    
+                    def __str__(self):
+                        return f"DocumentProxy(id={self.id}, mime={self.mime_type})"
+                
+                return DocumentProxy(self.info)
+            
+            def _create_photo_proxy(self):
+                """Создает заглушку для photo."""
+                class PhotoProxy:
+                    def __init__(self, info):
+                        self.id = info.get('id', 0)
+                        # ВАЖНО: основной код может проверять эти атрибуты
+                        self.sizes = []
+                    
+                    def __str__(self):
+                        return f"PhotoProxy(id={self.id})"
+                
+                return PhotoProxy(self.info)
+            
+            def __str__(self):
+                return f"MediaProxy({self.media_type})"
+            
+            def __bool__(self):
+                return True  # Медиа существует
+        
+        return MediaProxy(msg_dict.get('media_info'), msg_dict.get('media_type'))
     
     def __str__(self):
         return f"MessageProxy(id={self.id}, message='{self.message[:50]}...')"

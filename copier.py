@@ -1514,7 +1514,17 @@ class TelegramCopier:
             
             # Собираем все медиа файлы из альбома
             media_files = []
+            text_messages = []  # Собираем текстовые сообщения отдельно
+            
             for message in album_messages:
+                # ИСПРАВЛЕНИЕ: Специальная обработка MessageProxy объектов
+                if hasattr(message, '_original_data'):
+                    # Это MessageProxy из оптимизированного кэша (комментарий)
+                    # Добавляем как текстовое сообщение
+                    text_messages.append(message)
+                    self.logger.debug(f"MessageProxy {message.id} добавлен как текстовое сообщение")
+                    continue
+                    
                 if message.media:
                     if is_from_discussion_group:
                         # Для комментариев скачиваем медиа и создаем временный файл с правильным именем
@@ -1657,6 +1667,15 @@ class TelegramCopier:
                     source_ids = [msg.id for msg in album_messages]
                     target_ids = [sent_messages.id]
                     self.message_tracker.mark_album_copied(source_ids, target_ids)
+            
+            # НОВОЕ: Отправляем текстовые сообщения (MessageProxy объекты из кэша)
+            if text_messages:
+                self.logger.info(f"📝 Отправляем {len(text_messages)} текстовых сообщений из кэша комментариев")
+                for text_msg in text_messages:
+                    try:
+                        await self._send_text_message_from_proxy(text_msg)
+                    except Exception as e:
+                        self.logger.warning(f"Не удалось отправить текстовое сообщение {text_msg.id}: {e}")
             
             return True
             
@@ -2099,3 +2118,55 @@ class TelegramCopier:
         except Exception as e:
             self.logger.warning(f"Ошибка получения комментариев из кэша для сообщения {message.id}: {e}")
             return []
+    
+    async def _send_text_message_from_proxy(self, message_proxy) -> bool:
+        """
+        Отправляет текстовое сообщение из MessageProxy объекта.
+        
+        Args:
+            message_proxy: MessageProxy объект с данными комментария
+            
+        Returns:
+            True если отправка успешна, False иначе
+        """
+        try:
+            if not message_proxy.message or not message_proxy.message.strip():
+                self.logger.debug(f"MessageProxy {message_proxy.id}: пустое сообщение, пропускаем")
+                return True
+            
+            # Подготавливаем текст сообщения
+            text = message_proxy.message
+            
+            # Добавляем debug ID если нужно
+            if self.debug_message_ids:
+                text = self._add_debug_id_to_text(text, message_proxy.id)
+            
+            # Параметры для отправки
+            send_kwargs = {
+                'entity': self.target_entity,
+                'message': text
+            }
+            
+            # Добавляем entities если есть
+            if hasattr(message_proxy, 'entities') and message_proxy.entities:
+                send_kwargs['formatting_entities'] = message_proxy.entities
+            
+            # Отправляем сообщение
+            sent_message = await self.client.send_message(**send_kwargs)
+            
+            # Обновляем трекер
+            if self.message_tracker and sent_message:
+                self.message_tracker.mark_copied(message_proxy.id, sent_message.id)
+            
+            self.logger.debug(f"✅ MessageProxy {message_proxy.id} отправлен как текстовое сообщение {sent_message.id}")
+            
+            # Соблюдаем rate limit
+            if not self.dry_run:
+                self.rate_limiter.record_message_sent()
+                await self.rate_limiter.wait_if_needed()
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка отправки MessageProxy {getattr(message_proxy, 'id', 'unknown')}: {e}")
+            return False
