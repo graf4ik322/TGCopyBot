@@ -81,29 +81,17 @@ class TelegramCopierAppV3:
             if proxy_config:
                 self.logger.info(f"🌐 Использование прокси: {proxy_config['addr']}:{proxy_config['port']}")
             
-            # ИСПРАВЛЕНО: Создание клиента с безопасными параметрами (НЕ выбрасывает другие сессии)
-            device_profiles = [
-                {
-                    'device_model': 'Samsung SM-G991B',
-                    'system_version': 'SDK 31',
-                    'app_version': '8.9.2',
-                    'lang_code': 'en',
-                    'system_lang_code': 'en-US'
-                },
-                {
-                    'device_model': 'iPhone 13 Pro',
-                    'system_version': 'iOS 15.6.1',
-                    'app_version': '8.9.2',
-                    'lang_code': 'en',
-                    'system_lang_code': 'en-US'
-                }
-            ]
+            # ИСПРАВЛЕНО: Создание клиента с реальными параметрами системы
+            import platform
+            import socket
             
-            # Выбираем профиль детерминированно на основе session_name
-            profile_index = hash(self.config.session_name) % len(device_profiles)
-            device_profile = device_profiles[profile_index]
+            # Получаем реальную информацию о системе
+            hostname = socket.gethostname()
+            system_info = platform.system()
+            system_version = platform.release()
             
-            self.logger.info(f"📱 Профиль устройства: {device_profile['device_model']}")
+            self.logger.info(f"📱 Устройство: {hostname}")
+            self.logger.info(f"💻 Система: {system_info} {system_version}")
             
             self.client = TelegramClient(
                 session=self.config.session_name,
@@ -111,14 +99,14 @@ class TelegramCopierAppV3:
                 api_hash=self.config.api_hash,
                 proxy=proxy_config,
                 
-                # КРИТИЧЕСКИ ВАЖНЫЕ ПАРАМЕТРЫ для предотвращения конфликтов сессий
-                device_model=device_profile['device_model'],
-                system_version=device_profile['system_version'],
-                app_version=device_profile['app_version'],
-                lang_code=device_profile['lang_code'],
-                system_lang_code=device_profile['system_lang_code'],
+                # РЕАЛЬНЫЕ параметры системы (как в старой версии)
+                device_model=hostname,
+                system_version=f"{system_info} {system_version}",
+                app_version="1.0.0, Telegram Copier Script",
+                lang_code='en',
+                system_lang_code='en-US',
                 
-                # Дополнительные параметры безопасности
+                # Дополнительные параметры стабильности
                 connection_retries=5,
                 retry_delay=1,
                 auto_reconnect=True,
