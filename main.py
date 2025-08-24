@@ -81,12 +81,49 @@ class TelegramCopierAppV3:
             if proxy_config:
                 self.logger.info(f"🌐 Использование прокси: {proxy_config['addr']}:{proxy_config['port']}")
             
-            # Создание клиента
+            # ИСПРАВЛЕНО: Создание клиента с безопасными параметрами (НЕ выбрасывает другие сессии)
+            device_profiles = [
+                {
+                    'device_model': 'Samsung SM-G991B',
+                    'system_version': 'SDK 31',
+                    'app_version': '8.9.2',
+                    'lang_code': 'en',
+                    'system_lang_code': 'en-US'
+                },
+                {
+                    'device_model': 'iPhone 13 Pro',
+                    'system_version': 'iOS 15.6.1',
+                    'app_version': '8.9.2',
+                    'lang_code': 'en',
+                    'system_lang_code': 'en-US'
+                }
+            ]
+            
+            # Выбираем профиль детерминированно на основе session_name
+            profile_index = hash(self.config.session_name) % len(device_profiles)
+            device_profile = device_profiles[profile_index]
+            
+            self.logger.info(f"📱 Профиль устройства: {device_profile['device_model']}")
+            
             self.client = TelegramClient(
-                self.config.session_name,
-                self.config.api_id,
-                self.config.api_hash,
-                proxy=proxy_config
+                session=self.config.session_name,
+                api_id=self.config.api_id,
+                api_hash=self.config.api_hash,
+                proxy=proxy_config,
+                
+                # КРИТИЧЕСКИ ВАЖНЫЕ ПАРАМЕТРЫ для предотвращения конфликтов сессий
+                device_model=device_profile['device_model'],
+                system_version=device_profile['system_version'],
+                app_version=device_profile['app_version'],
+                lang_code=device_profile['lang_code'],
+                system_lang_code=device_profile['system_lang_code'],
+                
+                # Дополнительные параметры безопасности
+                connection_retries=5,
+                retry_delay=1,
+                auto_reconnect=True,
+                timeout=30,
+                request_retries=3
             )
             
             # Подключение

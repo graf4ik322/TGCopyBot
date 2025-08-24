@@ -111,14 +111,14 @@ class TelegramCopierV3:
         self.stop_requested = False
     
     async def initialize(self):
-        """Инициализация копировщика."""
+        """ИСПРАВЛЕНО: Инициализация копировщика с улучшенной обработкой entities."""
         try:
             # Инициализация базы данных
             self._init_database()
             
-            # Получение entities каналов
-            self.source_entity = await self.client.get_entity(self.source_channel_id)
-            self.target_entity = await self.client.get_entity(self.target_channel_id)
+            # ИСПРАВЛЕНО: Безопасное получение entities каналов с retry
+            self.source_entity = await self._get_entity_safe(self.source_channel_id, "исходного канала")
+            self.target_entity = await self._get_entity_safe(self.target_channel_id, "целевого канала")
             
             self.logger.info(f"✅ Источник: {getattr(self.source_entity, 'title', 'N/A')}")
             self.logger.info(f"✅ Цель: {getattr(self.target_entity, 'title', 'N/A')}")
@@ -131,6 +131,131 @@ class TelegramCopierV3:
         except Exception as e:
             self.logger.error(f"❌ Ошибка инициализации: {e}")
             raise
+    
+    async def _get_entity_safe(self, entity_id: Union[str, int], entity_name: str, max_retries: int = 5):
+        """
+        НОВОЕ: Безопасное получение entity с retry механизмом.
+        
+        Args:
+            entity_id: ID или username entity
+            entity_name: Название для логирования
+            max_retries: Максимальное количество попыток
+            
+        Returns:
+            Entity объект
+            
+        Raises:
+            Exception: Если entity не найдена после всех попыток
+        """
+        from telethon.errors import FloodWaitError, PeerFloodError
+        import asyncio
+        
+        self.logger.info(f"🔍 Поиск {entity_name}: {entity_id}")
+        
+        # Стратегии поиска
+        strategies = [
+            lambda: self.client.get_entity(entity_id),
+            lambda: self._get_entity_via_dialogs(entity_id),
+            lambda: self._get_entity_via_search(entity_id)
+        ]
+        
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            self.logger.debug(f"Попытка {attempt + 1}/{max_retries} для {entity_name}")
+            
+            for strategy_idx, strategy in enumerate(strategies):
+                try:
+                    entity = await strategy()
+                    if entity:
+                        self.logger.info(f"✅ {entity_name} найден (стратегия {strategy_idx + 1})")
+                        return entity
+                        
+                except (FloodWaitError, PeerFloodError) as e:
+                    wait_time = getattr(e, 'seconds', 30)
+                    self.logger.warning(f"FloodWait для {entity_name}: ожидание {wait_time}с")
+                    await asyncio.sleep(wait_time)
+                    
+                except Exception as e:
+                    last_exception = e
+                    self.logger.debug(f"Стратегия {strategy_idx + 1} для {entity_name} не сработала: {e}")
+                    continue
+            
+            # Пауза между попытками
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+        
+        # Все попытки исчерпаны
+        error_msg = f"Entity {entity_name} ({entity_id}) не найдена после {max_retries} попыток"
+        if last_exception:
+            error_msg += f". Последняя ошибка: {last_exception}"
+        
+        raise Exception(error_msg)
+    
+    async def _get_entity_via_dialogs(self, entity_id: Union[str, int]):
+        """Поиск entity через синхронизацию диалогов."""
+        try:
+            # Принудительная синхронизация диалогов
+            dialogs = await self.client.get_dialogs(limit=200)
+            
+            # Поиск в диалогах
+            for dialog in dialogs:
+                if self._match_entity(dialog.entity, entity_id):
+                    return dialog.entity
+                    
+            # Повторная попытка get_entity после синхронизации
+            return await self.client.get_entity(entity_id)
+            
+        except Exception:
+            return None
+    
+    async def _get_entity_via_search(self, entity_id: Union[str, int]):
+        """Поиск entity через глобальный поиск."""
+        try:
+            if isinstance(entity_id, str) and entity_id.startswith('@'):
+                username = entity_id[1:]
+                
+                # Поиск через API
+                result = await self.client(functions.contacts.SearchRequest(
+                    q=username,
+                    limit=10
+                ))
+                
+                # Проверяем результаты
+                for chat in result.chats:
+                    if hasattr(chat, 'username') and chat.username == username:
+                        return chat
+                        
+                for user in result.users:
+                    if hasattr(user, 'username') and user.username == username:
+                        return user
+                        
+        except Exception:
+            pass
+            
+        return None
+    
+    def _match_entity(self, entity, target_id: Union[str, int]) -> bool:
+        """Проверка соответствия entity целевому ID."""
+        try:
+            # По ID
+            if isinstance(target_id, int) and hasattr(entity, 'id'):
+                return entity.id == target_id
+                
+            # По username
+            if isinstance(target_id, str):
+                if target_id.startswith('@'):
+                    username = target_id[1:]
+                else:
+                    username = target_id
+                    
+                if hasattr(entity, 'username') and entity.username:
+                    return entity.username.lower() == username.lower()
+                    
+        except Exception:
+            pass
+            
+        return False
     
     def _init_database(self):
         """Инициализация SQLite базы данных."""
