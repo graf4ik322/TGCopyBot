@@ -403,27 +403,66 @@ class TelegramCopier:
                 # В discussion groups сообщения из канала дублируются с собственными ID
                 # Нужно найти дублированное сообщение и получить комментарии к нему
                 try:
-                    # Сначала ищем сообщение в discussion group, которое соответствует нашему посту
+                    # НОВЫЙ ПОДХОД: Используем прямой доступ к сообщению в discussion group
+                    # Часто ID сообщения в discussion group совпадает с ID в канале
                     target_discussion_message_id = None
                     
-                    # Ищем сообщение с forward_header, указывающим на наш пост
-                    async for disc_message in self.client.iter_messages(
-                        discussion_group,
-                        limit=50  # Ограничиваем поиск последними сообщениями
-                    ):
-                        # Проверяем, есть ли forward_header
-                        if (hasattr(disc_message, 'forward') and disc_message.forward and 
-                            hasattr(disc_message.forward, 'from_id') and
-                            hasattr(disc_message.forward, 'channel_post')):
+                    # Метод 1: Пробуем прямой доступ по ID
+                    try:
+                        direct_message = await self.client.get_messages(discussion_group, ids=message.id)
+                        if direct_message and not direct_message.empty:
+                            target_discussion_message_id = message.id
+                            self.logger.debug(f"Найдено сообщение через прямой доступ: канал {message.id} -> discussion {message.id}")
+                    except Exception as direct_error:
+                        self.logger.debug(f"Прямой доступ не удался для сообщения {message.id}: {direct_error}")
+                    
+                    # Метод 2: Поиск через forward, если прямой доступ не сработал
+                    if not target_discussion_message_id:
+                        checked_messages = 0
+                        
+                        # Ищем сообщение с forward_header, указывающим на наш пост
+                        async for disc_message in self.client.iter_messages(
+                            discussion_group,
+                            limit=200  # Разумный лимит
+                        ):
+                            checked_messages += 1
                             
-                            # Проверяем, что это пересланное сообщение из нашего канала
-                            if disc_message.forward.channel_post == message.id:
-                                target_discussion_message_id = disc_message.id
-                                self.logger.debug(f"Найдено соответствующее сообщение в discussion group: канал {message.id} -> discussion {disc_message.id}")
-                                break
+                            # Проверяем, есть ли forward_header
+                            if (hasattr(disc_message, 'forward') and disc_message.forward and 
+                                hasattr(disc_message.forward, 'channel_post')):
+                                
+                                # Проверяем, что это пересланное сообщение из нашего канала
+                                if disc_message.forward.channel_post == message.id:
+                                    target_discussion_message_id = disc_message.id
+                                    self.logger.debug(f"Найдено через forward: канал {message.id} -> discussion {disc_message.id} (проверено {checked_messages} сообщений)")
+                                    break
+                        
+                        if not target_discussion_message_id:
+                            self.logger.debug(f"Forward поиск не дал результатов для сообщения {message.id} после проверки {checked_messages} сообщений")
+                    
+                    # Метод 3: Поиск по содержимому, если предыдущие методы не сработали
+                    if not target_discussion_message_id:
+                        message_text = getattr(message, 'message', '').strip()
+                        if message_text and len(message_text) > 20:  # Только если есть достаточно текста
+                            search_text = message_text[:100]  # Первые 100 символов для более точного поиска
+                            self.logger.debug(f"Пробуем поиск по тексту для сообщения {message.id}: '{search_text[:30]}...'")
+                            
+                            async for disc_message in self.client.iter_messages(
+                                discussion_group,
+                                limit=50,
+                                reverse=True  # Ищем от старых к новым
+                            ):
+                                if hasattr(disc_message, 'message') and disc_message.message:
+                                    disc_text = disc_message.message.strip()
+                                    # Проверяем совпадение по тексту
+                                    if disc_text and (search_text in disc_text or disc_text in search_text):
+                                        target_discussion_message_id = disc_message.id
+                                        self.logger.debug(f"Найдено через текстовый поиск: канал {message.id} -> discussion {disc_message.id}")
+                                        break
                     
                     if target_discussion_message_id:
                         # Теперь получаем комментарии к найденному сообщению
+                        self.logger.debug(f"Ищем комментарии к сообщению {target_discussion_message_id} в discussion group {discussion_group_id}")
                         async for comment in self.client.iter_messages(
                             discussion_group, 
                             reply_to=target_discussion_message_id,
@@ -436,7 +475,7 @@ class TelegramCopier:
                             if comment_count % 500 == 0:
                                 self.logger.debug(f"   📥 Сообщение {message.id}: собрано {comment_count} комментариев...")
                     else:
-                        self.logger.debug(f"Сообщение {message.id}: не найдено соответствующее сообщение в discussion group")
+                        self.logger.warning(f"Сообщение {message.id}: не найдено соответствующее сообщение в discussion group {discussion_group_id}")
                             
                 except asyncio.TimeoutError:
                     self.logger.warning(f"Тайм-аут при сборе комментариев для сообщения {message.id} (собрано {comment_count})")
