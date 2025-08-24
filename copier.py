@@ -1018,6 +1018,7 @@ class TelegramCopier:
                 
                 # Получаем батч сообщений
                 batch = []
+                
                 async for message in self.client.iter_messages(**iter_params):
                     # Проверка дедупликации
                     if self.deduplicator.is_message_processed(message):
@@ -1029,6 +1030,9 @@ class TelegramCopier:
                 # Если батч пустой - конец
                 if not batch:
                     break
+                
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем, не разрезали ли альбом
+                batch = await self._ensure_complete_albums(batch, iter_params)
                 
                 # Обновляем offset_id для следующего батча
                 # В reverse=True режиме берем ID последнего (самого старого) сообщения
@@ -1046,6 +1050,67 @@ class TelegramCopier:
             except Exception as e:
                 self.logger.error(f"Ошибка получения батча сообщений: {e}")
                 break
+    
+    async def _ensure_complete_albums(self, batch: List[Message], iter_params: dict) -> List[Message]:
+        """
+        КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Убеждаемся, что альбомы не разрезаны между батчами.
+        
+        Args:
+            batch: Исходный батч сообщений
+            iter_params: Параметры для iter_messages
+            
+        Returns:
+            Батч с полными альбомами
+        """
+        if not batch:
+            return batch
+        
+        # Находим альбомы в батче
+        albums_in_batch = {}
+        for message in batch:
+            if hasattr(message, 'grouped_id') and message.grouped_id:
+                if message.grouped_id not in albums_in_batch:
+                    albums_in_batch[message.grouped_id] = []
+                albums_in_batch[message.grouped_id].append(message)
+        
+        if not albums_in_batch:
+            return batch  # Нет альбомов - батч готов
+        
+        # Проверяем, нет ли неполных альбомов в конце батча
+        last_message = batch[-1]
+        incomplete_albums = []
+        
+        for grouped_id, album_messages in albums_in_batch.items():
+            # Если последнее сообщение батча принадлежит альбому,
+            # проверяем, есть ли еще сообщения этого альбома после батча
+            if any(msg.id == last_message.id for msg in album_messages):
+                try:
+                    # Проверяем следующие сообщения
+                    check_params = iter_params.copy()
+                    check_params['offset_id'] = last_message.id
+                    check_params['limit'] = 10  # Проверяем следующие 10 сообщений
+                    
+                    async for next_message in self.client.iter_messages(**check_params):
+                        if (hasattr(next_message, 'grouped_id') and 
+                            next_message.grouped_id == grouped_id):
+                            # Найдено продолжение альбома - добавляем к батчу
+                            batch.append(next_message)
+                            album_messages.append(next_message)
+                            self.logger.debug(f"Добавлено сообщение {next_message.id} для завершения альбома {grouped_id}")
+                        else:
+                            # Альбом завершен
+                            break
+                            
+                except Exception as e:
+                    self.logger.warning(f"Ошибка проверки альбома {grouped_id}: {e}")
+        
+        # Сортируем батч по ID для сохранения хронологии
+        batch.sort(key=lambda msg: msg.id)
+        
+        if len(batch) > len(albums_in_batch) * 2:  # Простая проверка на разумный размер
+            self.logger.debug(f"Батч расширен до {len(batch)} сообщений для сохранения целостности альбомов")
+        
+        return batch
     
     async def _process_message_batch(self, batch: List[Message], progress_tracker: ProgressTracker) -> Dict[str, int]:
         """
