@@ -95,10 +95,13 @@ class TelegramCopier:
         if self.flatten_structure:
             self.logger.info("🔄 Включен режим антивложенности - комментарии будут превращены в обычные посты")
         
-        # НОВОЕ: Кэш комментариев для батчевой обработки
+        # ИСПРАВЛЕНО: Кэш комментариев для батчевой обработки
         self.comments_cache = {}  # {channel_post_id: [comments]}
         self.comments_cache_loaded = False
         self.discussion_groups_cache = set()  # Кэш ID discussion groups
+        
+        # НОВОЕ: Флаг для принудительной перезагрузки кэша при перезапуске
+        self.force_reload_comments = True
         
         # Инициализация трекера сообщений
         if self.use_message_tracker:
@@ -975,9 +978,10 @@ class TelegramCopier:
                 
                 self.logger.info(f"📦 Обрабатываем батч #{batch_number}: {len(batch)} сообщений")
                 
-                # НОВОЕ: Предварительно загружаем комментарии для батча (только один раз)
-                if not self.comments_cache_loaded:
+                # ИСПРАВЛЕНО: Предварительно загружаем комментарии для батча (или принудительно при перезапуске)
+                if not self.comments_cache_loaded or self.force_reload_comments:
                     await self.preload_all_comments_cache(batch)
+                    self.force_reload_comments = False  # Сбрасываем флаг после загрузки
                 
                 # Обрабатываем батч в хронологическом порядке
                 batch_stats = await self._process_message_batch(batch, progress_tracker)
@@ -1517,74 +1521,95 @@ class TelegramCopier:
             text_messages = []  # Собираем текстовые сообщения отдельно
             
             for message in album_messages:
-                # ИСПРАВЛЕНИЕ: Специальная обработка MessageProxy объектов
-                if hasattr(message, '_original_data'):
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Специальная обработка MessageProxy объектов
+                if hasattr(message, '_original_data') or message.__class__.__name__ == 'MessageProxy':
                     # Это MessageProxy из оптимизированного кэша (комментарий)
+                    # НЕ МОЖЕМ использовать их медиа, так как это заглушки
                     # Добавляем как текстовое сообщение
                     text_messages.append(message)
-                    self.logger.debug(f"MessageProxy {message.id} добавлен как текстовое сообщение")
+                    self.logger.debug(f"MessageProxy {message.id} добавлен как текстовое сообщение (медиа недоступно)")
                     continue
+                
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем, что медиа НЕ является MediaProxy заглушкой
+                if message.media and message.__class__.__name__ != 'MessageProxy':
+                    # Дополнительная проверка на MediaProxy
+                    if hasattr(message.media, '__class__') and 'MediaProxy' in str(message.media.__class__):
+                        self.logger.warning(f"Сообщение {message.id} содержит MediaProxy заглушку вместо реального медиа, пропускаем")
+                        # Добавляем как текстовое сообщение
+                        if hasattr(message, 'message') and message.message:
+                            text_messages.append(message)
+                        continue
                     
-                if message.media:
                     if is_from_discussion_group:
                         # Для комментариев скачиваем медиа и создаем временный файл с правильным именем
                         self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома с сохранением атрибутов")
                         
-                        # Получаем информацию о файле из оригинального медиа
-                        suggested_filename = None
-                        
-                        if hasattr(message.media, 'document') and message.media.document:
-                            doc = message.media.document
+                        try:
+                            # Получаем информацию о файле из оригинального медиа
+                            suggested_filename = None
                             
-                            # Пытаемся извлечь имя файла из атрибутов
-                            for attr in getattr(doc, 'attributes', []):
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    suggested_filename = attr.file_name
-                                    break
-                            
-                            # Если имя файла не найдено, генерируем на основе MIME-типа
-                            if not suggested_filename:
-                                mime_type = getattr(doc, 'mime_type', None)
-                                if mime_type:
-                                    if mime_type.startswith('image/'):
-                                        extension = mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif mime_type.startswith('video/'):
-                                        extension = mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif mime_type.startswith('audio/'):
-                                        extension = mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
+                            if hasattr(message.media, 'document') and message.media.document:
+                                doc = message.media.document
+                                
+                                # Пытаемся извлечь имя файла из атрибутов
+                                for attr in getattr(doc, 'attributes', []):
+                                    if isinstance(attr, DocumentAttributeFilename):
+                                        suggested_filename = attr.file_name
+                                        break
+                                
+                                # Если имя файла не найдено, генерируем на основе MIME-типа
+                                if not suggested_filename:
+                                    mime_type = getattr(doc, 'mime_type', None)
+                                    if mime_type:
+                                        if mime_type.startswith('image/'):
+                                            extension = mime_type.split('/')[-1]
+                                            if extension == 'jpeg':
+                                                extension = 'jpg'
+                                            suggested_filename = f"image_{message.id}.{extension}"
+                                        elif mime_type.startswith('video/'):
+                                            extension = mime_type.split('/')[-1]
+                                            suggested_filename = f"video_{message.id}.{extension}"
+                                        elif mime_type.startswith('audio/'):
+                                            extension = mime_type.split('/')[-1]
+                                            suggested_filename = f"audio_{message.id}.{extension}"
+                                        else:
+                                            suggested_filename = f"document_{message.id}"
                                     else:
                                         suggested_filename = f"document_{message.id}"
-                                else:
-                                    suggested_filename = f"document_{message.id}"
+                            
+                            elif isinstance(message.media, MessageMediaPhoto):
+                                suggested_filename = f"photo_{message.id}.jpg"
+                            
+                            if not suggested_filename:
+                                suggested_filename = f"media_{message.id}"
+                            
+                            # Скачиваем файл как bytes
+                            downloaded_file = await self.client.download_media(message.media, file=bytes)
+                            
+                            if downloaded_file:
+                                # Создаем временный файл в памяти с правильным именем
+                                import tempfile
+                                import os
+                                
+                                # Создаем временный файл с правильным именем
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{suggested_filename}") as temp_file:
+                                    temp_file.write(downloaded_file)
+                                    temp_file_path = temp_file.name
+                                
+                                # Переименовываем файл для правильного имени
+                                proper_temp_path = os.path.join(os.path.dirname(temp_file_path), suggested_filename)
+                                os.rename(temp_file_path, proper_temp_path)
+                                
+                                media_files.append(proper_temp_path)
+                            else:
+                                self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}")
+                                if hasattr(message, 'message') and message.message:
+                                    text_messages.append(message)
                         
-                        elif isinstance(message.media, MessageMediaPhoto):
-                            suggested_filename = f"photo_{message.id}.jpg"
-                        
-                        if not suggested_filename:
-                            suggested_filename = f"media_{message.id}"
-                        
-                        # Скачиваем файл как bytes
-                        downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        # Создаем временный файл в памяти с правильным именем
-                        import tempfile
-                        import os
-                        
-                        # Создаем временный файл с правильным именем
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{suggested_filename}") as temp_file:
-                            temp_file.write(downloaded_file)
-                            temp_file_path = temp_file.name
-                        
-                        # Переименовываем файл для правильного имени
-                        proper_temp_path = os.path.join(os.path.dirname(temp_file_path), suggested_filename)
-                        os.rename(temp_file_path, proper_temp_path)
-                        
-                        media_files.append(proper_temp_path)
+                        except Exception as download_error:
+                            self.logger.error(f"Ошибка скачивания медиа из сообщения {message.id}: {download_error}")
+                            if hasattr(message, 'message') and message.message:
+                                text_messages.append(message)
                     else:
                         # Для основных сообщений используем прямую ссылку
                         media_files.append(message.media)
