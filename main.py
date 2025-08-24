@@ -350,7 +350,8 @@ class TelegramCopierApp:
                 use_message_tracker=getattr(self.config, 'use_message_tracker', True),
                 tracker_file=getattr(self.config, 'tracker_file', 'copied_messages.json'),
                 add_debug_tags=getattr(self.config, 'add_debug_tags', False),
-                flatten_structure=getattr(self.config, 'flatten_structure', False)
+                flatten_structure=getattr(self.config, 'flatten_structure', False),
+                debug_message_ids=getattr(self.config, 'debug_message_ids', False)
             )
             
             # Проверяем, нужно ли возобновить с определенного места
@@ -505,6 +506,9 @@ DRY_RUN={'true' if dry_run else 'false'}
 # Дополнительные настройки
 SESSION_NAME=telegram_copier
 RESUME_FILE=last_message_id.txt
+
+# Отладка
+DEBUG_MESSAGE_IDS=false
 """
     
     with open('.env', 'w', encoding='utf-8') as f:

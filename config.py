@@ -43,6 +43,9 @@ class Config:
         self.tracker_file: str = os.getenv("TRACKER_FILE", "copied_messages.json")
         self.add_debug_tags: bool = os.getenv("ADD_DEBUG_TAGS", "false").lower() == "true"
         
+        # НОВОЕ: Отладочный режим - добавление ID сообщений к тексту
+        self.debug_message_ids: bool = os.getenv("DEBUG_MESSAGE_IDS", "false").lower() == "true"
+        
         # НОВОЕ: Настройка антивложенности
         self.flatten_structure = os.getenv('FLATTEN_STRUCTURE', 'false').lower() == 'true'
         

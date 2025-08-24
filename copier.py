@@ -34,7 +34,8 @@ class TelegramCopier:
     def __init__(self, client: TelegramClient, source_group_id: str, target_group_id: str,
                  rate_limiter: RateLimiter, dry_run: bool = False, resume_file: str = 'last_message_id.txt',
                  use_message_tracker: bool = True, tracker_file: str = 'copied_messages.json', 
-                 add_debug_tags: bool = False, flatten_structure: bool = False):
+                 add_debug_tags: bool = False, flatten_structure: bool = False, 
+                 debug_message_ids: bool = False):
         """
         Инициализация копировщика.
         
@@ -49,6 +50,7 @@ class TelegramCopier:
             tracker_file: Файл для хранения информации о скопированных сообщениях
             add_debug_tags: Добавлять ли debug теги к сообщениям
             flatten_structure: Превращать ли вложенность в плоскую структуру (антивложенность)
+            debug_message_ids: Добавлять ли ID сообщений к тексту для отладки
         """
         self.client = client
         self.source_group_id = source_group_id
@@ -78,6 +80,11 @@ class TelegramCopier:
         self.use_message_tracker = use_message_tracker
         self.add_debug_tags = add_debug_tags
         
+        # НОВОЕ: Отладочный режим - добавление ID к сообщениям
+        self.debug_message_ids = debug_message_ids
+        if self.debug_message_ids:
+            self.logger.info("🐛 Включен режим отладки - ID сообщений будут добавлены к тексту")
+        
         # НОВОЕ: Режим антивложенности
         self.flatten_structure = flatten_structure
         if self.flatten_structure:
@@ -93,6 +100,28 @@ class TelegramCopier:
         
         # Очистка старых хешей при инициализации
         self.deduplicator.cleanup_old_hashes()
+    
+    def _add_debug_id_to_text(self, text: str, message_id: int) -> str:
+        """
+        Добавляет ID сообщения к тексту в режиме отладки.
+        
+        Args:
+            text: Оригинальный текст сообщения
+            message_id: ID сообщения
+            
+        Returns:
+            Текст с добавленным ID (если включен debug режим)
+        """
+        if not self.debug_message_ids:
+            return text
+        
+        debug_suffix = f"\n\n🐛 DEBUG: Message ID {message_id}"
+        
+        if text:
+            return text + debug_suffix
+        else:
+            # Если оригинального текста нет, добавляем только debug ID
+            return debug_suffix.strip()
     
     async def initialize(self) -> bool:
         """
@@ -976,16 +1005,26 @@ class TelegramCopier:
             # ИСПРАВЛЕНИЕ: Получаем текст из ЛЮБОГО сообщения альбома, где он есть
             caption = ""
             caption_entities = None
+            caption_message_id = None
             
             # Проверяем все сообщения альбома на наличие текста
             for msg in album_messages:
                 if msg.message and msg.message.strip():
                     caption = msg.message
                     caption_entities = msg.entities
+                    caption_message_id = msg.id
                     self.logger.debug(f"Найден текст альбома в сообщении {msg.id}: '{caption[:50]}...'")
                     break  # Берем первый найденный непустой текст
             
-            if not caption:
+            # Если текста нет, но включен debug режим, добавляем ID первого сообщения альбома
+            if not caption and self.debug_message_ids:
+                caption_message_id = album_messages[0].id
+            
+            # Добавляем debug ID к тексту альбома
+            if caption_message_id:
+                caption = self._add_debug_id_to_text(caption, caption_message_id)
+            
+            if not caption and not self.debug_message_ids:
                 self.logger.debug("Альбом без текста")
             
             # Подготавливаем параметры для отправки альбома
@@ -1106,6 +1145,9 @@ class TelegramCopier:
             
             # ИСПРАВЛЕННОЕ 1:1 копирование с сохранением всего форматирования
             text = message.message or ""
+            
+            # Добавляем debug ID к тексту сообщения
+            text = self._add_debug_id_to_text(text, message.id)
             
             # Подготавливаем параметры для отправки
             send_kwargs = {
