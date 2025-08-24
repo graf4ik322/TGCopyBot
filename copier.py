@@ -95,6 +95,11 @@ class TelegramCopier:
         if self.flatten_structure:
             self.logger.info("🔄 Включен режим антивложенности - комментарии будут превращены в обычные посты")
         
+        # НОВОЕ: Кэш комментариев для батчевой обработки
+        self.comments_cache = {}  # {channel_post_id: [comments]}
+        self.comments_cache_loaded = False
+        self.discussion_groups_cache = set()  # Кэш ID discussion groups
+        
         # Инициализация трекера сообщений
         if self.use_message_tracker:
             self.message_tracker = MessageTracker(tracker_file)
@@ -963,15 +968,19 @@ class TelegramCopier:
             # НОВАЯ АРХИТЕКТУРА: Батчевая обработка
             batch_number = 1
             
-            # Получаем батчи сообщений и обрабатываем их по порядку
-            async for batch in self._get_message_batches(min_id):
-                if not batch:  # Пустой батч - конец
-                    break
-                
-                self.logger.info(f"📦 Обрабатываем батч #{batch_number}: {len(batch)} сообщений")
-                
-                # Обрабатываем батч в хронологическом порядке
-                batch_stats = await self._process_message_batch(batch, progress_tracker)
+                    # Получаем батчи сообщений и обрабатываем их по порядку
+        async for batch in self._get_message_batches(min_id):
+            if not batch:  # Пустой батч - конец
+                break
+            
+            self.logger.info(f"📦 Обрабатываем батч #{batch_number}: {len(batch)} сообщений")
+            
+            # НОВОЕ: Предварительно загружаем комментарии для батча (только один раз)
+            if not self.comments_cache_loaded:
+                await self.preload_all_comments_cache(batch)
+            
+            # Обрабатываем батч в хронологическом порядке
+            batch_stats = await self._process_message_batch(batch, progress_tracker)
                 
                 # Обновляем общую статистику
                 self.copied_messages += batch_stats['copied']
@@ -1183,11 +1192,11 @@ class TelegramCopier:
             for message in batch:
                 batch_with_comments.append(message)
                 
-                # Получаем комментарии для сообщения
+                # НОВОЕ: Получаем комментарии из кэша
                 try:
-                    comments = await self.get_comments_for_message(message)
+                    comments = await self.get_comments_from_cache(message)
                     if comments:
-                        self.logger.debug(f"💬 Сообщение {message.id}: найдено {len(comments)} комментариев")
+                        self.logger.debug(f"💬 Сообщение {message.id}: найдено {len(comments)} комментариев в кэше")
                         
                         # Помечаем комментарии специальным атрибутом
                         for comment in comments:
@@ -1196,10 +1205,10 @@ class TelegramCopier:
                         
                         batch_with_comments.extend(comments)
                     else:
-                        self.logger.debug(f"💬 Сообщение {message.id}: комментариев не найдено")
+                        self.logger.debug(f"💬 Сообщение {message.id}: комментариев в кэше не найдено")
                         
                 except Exception as e:
-                    self.logger.warning(f"Ошибка получения комментариев для сообщения {message.id}: {e}")
+                    self.logger.warning(f"Ошибка получения комментариев из кэша для сообщения {message.id}: {e}")
             
             # Сортируем весь батч (сообщения + комментарии) по дате для правильной хронологии
             batch_with_comments.sort(key=lambda msg: msg.date if hasattr(msg, 'date') and msg.date else msg.id)
@@ -1398,8 +1407,8 @@ class TelegramCopier:
             return comments_stats
         
         try:
-            # Получаем комментарии к родительскому сообщению
-            comments = await self.get_comments_for_message(parent_message)
+            # НОВОЕ: Получаем комментарии из кэша
+            comments = await self.get_comments_from_cache(parent_message)
             
             if not comments:
                 self.logger.debug(f"{'  ' * depth}💬 Сообщение {parent_message.id}: комментариев не найдено (глубина {depth})")
@@ -1993,3 +2002,100 @@ class TelegramCopier:
             'start_id': start_id,
             'end_id': end_id
         }
+    
+    async def preload_all_comments_cache(self, sample_batch: List[Message]) -> None:
+        """
+        НОВЫЙ ПОДХОД: Предварительно загружает ВСЕ комментарии из ВСЕХ discussion groups канала
+        для батчевой обработки. Использует первый батч для определения discussion groups.
+        
+        Args:
+            sample_batch: Первый батч сообщений для определения всех discussion groups канала
+        """
+        if self.comments_cache_loaded:
+            return  # Кэш уже загружен
+        
+        try:
+            self.logger.info(f"🔄 ГЛОБАЛЬНАЯ ПРЕДВАРИТЕЛЬНАЯ ЗАГРУЗКА: Сканируем канал для поиска discussion groups...")
+            
+            # ЭТАП 1: Сканируем ВЕСЬ канал для поиска всех discussion groups
+            discussion_groups = set()
+            scanned_messages = 0
+            
+            # Сканируем большую выборку сообщений для полного поиска discussion groups
+            async for message in self.client.iter_messages(self.source_entity, limit=5000):
+                scanned_messages += 1
+                
+                if (hasattr(message, 'replies') and message.replies and
+                    hasattr(message.replies, 'comments') and message.replies.comments and
+                    hasattr(message.replies, 'channel_id') and message.replies.channel_id):
+                    discussion_groups.add(message.replies.channel_id)
+                
+                # Логируем прогресс каждые 1000 сообщений
+                if scanned_messages % 1000 == 0:
+                    self.logger.info(f"   📊 Просканировано {scanned_messages} сообщений, найдено {len(discussion_groups)} discussion groups")
+            
+            self.logger.info(f"📊 СКАНИРОВАНИЕ ЗАВЕРШЕНО: просканировано {scanned_messages} сообщений, "
+                           f"найдено {len(discussion_groups)} уникальных discussion groups")
+            
+            if not discussion_groups:
+                self.logger.info("💬 Discussion groups не найдены в канале")
+                self.comments_cache_loaded = True
+                return
+            
+            # ЭТАП 2: Загружаем ВСЕ комментарии из ВСЕХ найденных discussion groups
+            total_comments = 0
+            total_posts_with_comments = 0
+            
+            for discussion_group_id in discussion_groups:
+                self.logger.info(f"📥 Загружаем ВСЕ комментарии из discussion group {discussion_group_id}")
+                
+                try:
+                    comments_by_post = await self.get_all_comments_from_discussion_group(discussion_group_id)
+                    
+                    # Добавляем в общий кэш
+                    for post_id, comments in comments_by_post.items():
+                        if post_id not in self.comments_cache:
+                            self.comments_cache[post_id] = []
+                            total_posts_with_comments += 1
+                        self.comments_cache[post_id].extend(comments)
+                        total_comments += len(comments)
+                    
+                    # Помечаем группу как загруженную
+                    self.discussion_groups_cache.add(discussion_group_id)
+                    
+                    self.logger.info(f"✅ Загружено {len(comments_by_post)} связей пост->комментарии из группы {discussion_group_id}")
+                    
+                except Exception as e:
+                    self.logger.error(f"❌ Ошибка загрузки комментариев из группы {discussion_group_id}: {e}")
+            
+            self.comments_cache_loaded = True
+            self.logger.info(f"🎯 ГЛОБАЛЬНАЯ ПРЕДВАРИТЕЛЬНАЯ ЗАГРУЗКА ЗАВЕРШЕНА:")
+            self.logger.info(f"   📊 Загружено {total_comments} комментариев")
+            self.logger.info(f"   📊 Для {total_posts_with_comments} постов с комментариями")
+            self.logger.info(f"   📊 Из {len(discussion_groups)} discussion groups")
+            self.logger.info(f"   🚀 Теперь все батчи будут использовать кэш!")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка предварительной загрузки комментариев: {e}")
+    
+    async def get_comments_from_cache(self, message: Message) -> List[Message]:
+        """
+        НОВЫЙ ПОДХОД: Получает комментарии для сообщения из предварительно загруженного кэша.
+        
+        Args:
+            message: Сообщение из канала, для которого нужно получить комментарии
+            
+        Returns:
+            Список сообщений-комментариев из кэша
+        """
+        try:
+            comments = self.comments_cache.get(message.id, [])
+            if comments:
+                self.logger.debug(f"💬 Сообщение {message.id}: найдено {len(comments)} комментариев в кэше")
+            else:
+                self.logger.debug(f"💬 Сообщение {message.id}: комментариев в кэше не найдено")
+            return comments
+            
+        except Exception as e:
+            self.logger.warning(f"Ошибка получения комментариев из кэша для сообщения {message.id}: {e}")
+            return []
