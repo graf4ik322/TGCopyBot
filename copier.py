@@ -1154,8 +1154,8 @@ class TelegramCopier:
         import gc
         gc.collect()  # Принудительный сбор мусора
         
-        # Очищаем кэши дедупликатора (оставляем только последние записи)
-        self.deduplicator.cleanup_old_hashes(keep_recent=1000)
+        # Очищаем кэши дедупликатора (только если файл старый)
+        self.deduplicator.cleanup_old_hashes()
         
         # Небольшая пауза для системы
         await asyncio.sleep(0.1)
