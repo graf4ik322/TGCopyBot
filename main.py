@@ -15,6 +15,7 @@ from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, P
 from config import Config
 from utils import setup_logging, RateLimiter, load_last_message_id, ProcessLock
 from copier import TelegramCopier
+from memory_optimization_patch import apply_memory_optimization
 
 
 class TelegramCopierApp:
@@ -354,6 +355,14 @@ class TelegramCopierApp:
                 debug_message_ids=getattr(self.config, 'debug_message_ids', False),
                 batch_size=getattr(self.config, 'batch_size', 100)
             )
+            
+            # НОВОЕ: Применяем оптимизацию памяти
+            if getattr(self.config, 'enable_memory_optimization', True):
+                memory_limit = getattr(self.config, 'memory_limit_mb', 100)
+                self.logger.info(f"🧠 Применяем оптимизацию памяти (лимит: {memory_limit} MB)")
+                apply_memory_optimization(self.copier, memory_limit)
+            else:
+                self.logger.info("⚠️ Оптимизация памяти отключена в конфигурации")
             
             # Проверяем, нужно ли возобновить с определенного места
             resume_from_id = load_last_message_id(self.config.resume_file)

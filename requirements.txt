@@ -5,3 +5,4 @@ tqdm>=4.66.1
 cryptography>=42.0.0
 pytest>=7.4.4
 pytest-asyncio>=0.23.2
+psutil>=5.9.0

@@ -52,6 +52,11 @@ class Config:
         # ИСПРАВЛЕНИЕ: Размер батча для предотвращения проблем с памятью
         self.batch_size: int = int(os.getenv('BATCH_SIZE', '100'))
         
+        # НОВОЕ: Настройки оптимизации памяти
+        self.enable_memory_optimization: bool = os.getenv('ENABLE_MEMORY_OPTIMIZATION', 'true').lower() == 'true'
+        self.memory_limit_mb: int = int(os.getenv('MEMORY_LIMIT_MB', '100'))
+        self.lru_cache_size: int = int(os.getenv('LRU_CACHE_SIZE', '1000'))
+        
         # Proxy settings (optional)
         self.proxy_server: Optional[str] = os.getenv('PROXY_SERVER')
         # ИСПРАВЛЕНИЕ: Безопасное преобразование PROXY_PORT
