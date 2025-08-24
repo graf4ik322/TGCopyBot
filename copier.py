@@ -968,19 +968,19 @@ class TelegramCopier:
             # НОВАЯ АРХИТЕКТУРА: Батчевая обработка
             batch_number = 1
             
-                    # Получаем батчи сообщений и обрабатываем их по порядку
-        async for batch in self._get_message_batches(min_id):
-            if not batch:  # Пустой батч - конец
-                break
-            
-            self.logger.info(f"📦 Обрабатываем батч #{batch_number}: {len(batch)} сообщений")
-            
-            # НОВОЕ: Предварительно загружаем комментарии для батча (только один раз)
-            if not self.comments_cache_loaded:
-                await self.preload_all_comments_cache(batch)
-            
-            # Обрабатываем батч в хронологическом порядке
-            batch_stats = await self._process_message_batch(batch, progress_tracker)
+            # Получаем батчи сообщений и обрабатываем их по порядку
+            async for batch in self._get_message_batches(min_id):
+                if not batch:  # Пустой батч - конец
+                    break
+                
+                self.logger.info(f"📦 Обрабатываем батч #{batch_number}: {len(batch)} сообщений")
+                
+                # НОВОЕ: Предварительно загружаем комментарии для батча (только один раз)
+                if not self.comments_cache_loaded:
+                    await self.preload_all_comments_cache(batch)
+                
+                # Обрабатываем батч в хронологическом порядке
+                batch_stats = await self._process_message_batch(batch, progress_tracker)
                 
                 # Обновляем общую статистику
                 self.copied_messages += batch_stats['copied']
