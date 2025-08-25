@@ -155,11 +155,11 @@ class TelegramCopierV3:
         # НОВОЕ: Обработка специальных ошибок Telegram API
         try:
             # Проверяем состояние клиента перед началом поиска
-            if not await self.client.is_connected():
+            if not self.client.is_connected():
                 await self.client.connect()
                 await asyncio.sleep(1)  # Даем время на стабилизацию соединения
         except Exception as e:
-            self.logger.warning(f"⚠️ Проблема с подключением: {e}")
+            self.logger.debug(f"Проверка подключения: {e}")
         
         self.logger.info(f"🔍 Поиск {entity_name}: {entity_id}")
         
