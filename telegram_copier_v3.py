@@ -32,7 +32,9 @@ from telethon.tl.types import (
     MessageEntitySpoiler, MessageEntityBlockquote
 )
 from telethon.tl import functions
-from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
+from telethon.tl.functions.contacts import ResolveUsernameRequest
+from telethon.tl.functions.channels import GetChannelsRequest
+from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError, ChannelPrivateError, ChatInvalidError
 
 
 @dataclass
@@ -1199,6 +1201,68 @@ class TelegramCopierV3:
         """Остановка копирования."""
         self.stop_requested = True
         self.logger.info("⏹️ Запрошена остановка копирования")
+    
+    async def _validate_entity_access(self, entity, entity_name: str) -> bool:
+        """НОВОЕ: Проверка доступа к найденной entity."""
+        try:
+            # Проверяем, что entity не None и имеет необходимые атрибуты
+            if not entity or not hasattr(entity, 'id'):
+                return False
+            
+            # Для каналов проверяем дополнительные права
+            if hasattr(entity, 'megagroup') or hasattr(entity, 'broadcast'):
+                # Пробуем получить несколько сообщений для проверки доступа
+                try:
+                    messages = await self.client.get_messages(entity, limit=1)
+                    self.logger.debug(f"✅ Доступ к {entity_name} подтвержден")
+                    return True
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Ограниченный доступ к {entity_name}: {e}")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.debug(f"❌ Ошибка валидации доступа к {entity_name}: {e}")
+            return False
+    
+    async def _log_diagnostic_info(self, entity_id: Union[str, int], entity_name: str):
+        """НОВОЕ: Детальная диагностика для troubleshooting."""
+        try:
+            self.logger.error("🔍 ДИАГНОСТИЧЕСКАЯ ИНФОРМАЦИЯ:")
+            
+            # Информация о клиенте
+            if await self.client.is_user_authorized():
+                me = await self.client.get_me()
+                self.logger.error(f"   👤 Пользователь: {me.first_name} (ID: {me.id})")
+            else:
+                self.logger.error("   ❌ Клиент не авторизован")
+                return
+            
+            # Информация о entity_id
+            self.logger.error(f"   🎯 Искомый ID: {entity_id} (тип: {type(entity_id).__name__})")
+            
+            # Список доступных диалогов
+            try:
+                dialogs = await self.client.get_dialogs(limit=10)
+                self.logger.error(f"   📁 Доступных диалогов: {len(dialogs)}")
+                for i, dialog in enumerate(dialogs[:5]):
+                    entity_info = f"ID: {dialog.entity.id}, Название: {getattr(dialog.entity, 'title', getattr(dialog.entity, 'first_name', 'N/A'))}"
+                    self.logger.error(f"     {i+1}. {entity_info}")
+                if len(dialogs) > 5:
+                    self.logger.error(f"     ... и еще {len(dialogs) - 5} диалогов")
+            except Exception as e:
+                self.logger.error(f"   ❌ Ошибка получения диалогов: {e}")
+            
+            # Рекомендации по устранению
+            self.logger.error("💡 РЕКОМЕНДАЦИИ:")
+            self.logger.error("   1. Убедитесь, что ID канала корректен")
+            self.logger.error("   2. Проверьте, что аккаунт является участником канала")
+            self.logger.error("   3. Убедитесь, что канал не был удален или заблокирован")
+            self.logger.error("   4. Попробуйте использовать @username вместо числового ID")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка диагностики: {e}")
 
 
 async def main():
