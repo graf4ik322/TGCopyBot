@@ -880,6 +880,37 @@ class TelegramCopierV3:
         
         return suggested_filename, original_mime_type, extension
     
+    async def _download_media_with_attributes(self, media, message_id: int):
+        """
+        НОВОЕ: Скачивание медиа с сохранением атрибутов файла (на основе коммита 907d630).
+        
+        Args:
+            media: Медиа объект из сообщения
+            message_id: ID сообщения для генерации имени
+            
+        Returns:
+            Tuple (media_file, filename) где filename=None для fallback к прямой ссылке
+        """
+        try:
+            # Получаем атрибуты файла
+            suggested_filename, original_mime_type, extension = self._get_file_attributes_from_media(
+                media, message_id
+            )
+            
+            # Скачиваем файл как bytes
+            downloaded_file = await self.client.download_media(media, file=bytes)
+            
+            if downloaded_file and suggested_filename:
+                self.logger.debug(f"Медиа файл скачан как: {suggested_filename}")
+                return (downloaded_file, suggested_filename)
+            else:
+                self.logger.debug("Fallback к оригинальному медиа")
+                return (media, None)
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Ошибка скачивания медиа: {e}, используем fallback")
+            return (media, None)
+    
     async def copy_all_messages_chronologically(self) -> bool:
         """
         Копирование всех сообщений в хронологическом порядке.
@@ -1119,11 +1150,21 @@ class TelegramCopierV3:
                 'link_preview': False
             }
             
-            # Обработка медиа
+            # ИСПРАВЛЕНО: Обработка медиа с сохранением атрибутов (на основе коммита 907d630)
             if media_type and media_data:
                 original_message = await self._get_original_message(post_id)
                 if original_message and original_message.media:
-                    send_kwargs['file'] = original_message.media
+                    # Скачиваем медиа с атрибутами
+                    media_file, filename = await self._download_media_with_attributes(original_message.media, post_id)
+                    
+                    if filename:
+                        # Используем кортеж (data, filename) для правильного отображения
+                        send_kwargs['file'] = (media_file, filename)
+                        self.logger.debug(f"Пост медиа будет отправлен как: {filename}")
+                    else:
+                        # Fallback к прямой ссылке
+                        send_kwargs['file'] = media_file
+                    
                     send_kwargs['caption'] = message_text
                     del send_kwargs['message']  # Для медиа используем caption
             
@@ -1172,10 +1213,19 @@ class TelegramCopierV3:
                     caption = message_text
                     entities = self._restore_entities(entities_data)
                 
-                # Получаем оригинальное сообщение для медиа
+                # ИСПРАВЛЕНО: Получаем оригинальное сообщение для медиа с атрибутами (коммит 907d630)
                 original_message = await self._get_original_message(post_id)
                 if original_message and original_message.media:
-                    media_files.append(original_message.media)
+                    # Скачиваем медиа с атрибутами
+                    media_file, filename = await self._download_media_with_attributes(original_message.media, post_id)
+                    
+                    if filename:
+                        # Используем кортеж (data, filename) для правильного отображения
+                        media_files.append((media_file, filename))
+                        self.logger.debug(f"Альбом медиа будет отправлен как: {filename}")
+                    else:
+                        # Fallback к прямой ссылке
+                        media_files.append(media_file)
             
             if not media_files:
                 self.logger.warning(f"⚠️ Альбом {grouped_id} не содержит медиа файлов")
@@ -1293,11 +1343,21 @@ class TelegramCopierV3:
                 }
                 self.logger.debug(f"💬 Отправляем комментарий {comment_id} как ответ на пост {target_post_id}")
             
-            # Обработка медиа
+            # ИСПРАВЛЕНО: Обработка медиа с сохранением атрибутов (на основе коммита 907d630)
             if media_type and media_data:
                 original_comment = await self._get_original_comment(comment_id)
                 if original_comment and original_comment.media:
-                    send_kwargs['file'] = original_comment.media
+                    # Скачиваем медиа с атрибутами (для комментариев всегда используем скачивание)
+                    media_file, filename = await self._download_media_with_attributes(original_comment.media, comment_id)
+                    
+                    if filename:
+                        # Используем кортеж (data, filename) для правильного отображения
+                        send_kwargs['file'] = (media_file, filename)
+                        self.logger.debug(f"Комментарий медиа будет отправлен как: {filename}")
+                    else:
+                        # Fallback к прямой ссылке
+                        send_kwargs['file'] = media_file
+                    
                     send_kwargs['caption'] = comment_text
                     del send_kwargs['message']  # Для медиа используем caption
             
