@@ -152,18 +152,29 @@ class TelegramCopierV3:
         from telethon.errors import FloodWaitError, PeerFloodError, ChannelPrivateError, ChatInvalidError
         import asyncio
         
+        # НОВОЕ: Обработка специальных ошибок Telegram API
+        try:
+            # Проверяем состояние клиента перед началом поиска
+            if not await self.client.is_connected():
+                await self.client.connect()
+                await asyncio.sleep(1)  # Даем время на стабилизацию соединения
+        except Exception as e:
+            self.logger.warning(f"⚠️ Проблема с подключением: {e}")
+        
         self.logger.info(f"🔍 Поиск {entity_name}: {entity_id}")
         
         # НОВОЕ: Предварительная диагностика
         await self._diagnose_entity_access(entity_id, entity_name)
         
-        # Улучшенные стратегии поиска
+        # РАСШИРЕННЫЕ стратегии поиска для совместимости с предыдущими версиями
         strategies = [
             lambda: self._get_entity_direct(entity_id),
             lambda: self._get_entity_via_full_dialogs(entity_id),
-            lambda: self._get_entity_via_search(entity_id),
+            lambda: self._get_entity_via_peer_resolver(entity_id),
+            lambda: self._get_entity_legacy_mode(entity_id),  # НОВОЕ: как в старых версиях
             lambda: self._get_entity_via_username_resolve(entity_id),
-            lambda: self._get_entity_via_peer_resolver(entity_id)
+            lambda: self._get_entity_via_search(entity_id),
+            lambda: self._get_entity_force_fetch(entity_id)   # НОВОЕ: принудительный поиск
         ]
         
         last_exception = None
@@ -191,9 +202,21 @@ class TelegramCopierV3:
                 except (ChannelPrivateError, ChatInvalidError) as e:
                     self.logger.error(f"❌ {entity_name} недоступен: {e}")
                     raise Exception(f"{entity_name} недоступен - канал приватный или не существует")
-                    
+                
                 except Exception as e:
                     last_exception = e
+                    error_msg = str(e)
+                    
+                    # НОВОЕ: Специальная обработка ошибок Telegram API
+                    if "HistoryGetFailedError" in error_msg or "GetChannelDifferenceRequest" in error_msg:
+                        self.logger.warning(f"⚠️ Проблемы с Telegram API, пропускаем стратегию {strategy_idx + 1}")
+                        await asyncio.sleep(2)  # Больше времени для восстановления API
+                        continue
+                    elif "internal issues" in error_msg.lower():
+                        self.logger.warning(f"⚠️ Внутренние проблемы Telegram, ждем...")
+                        await asyncio.sleep(5)
+                        continue
+                    
                     self.logger.debug(f"Стратегия {strategy_idx + 1} для {entity_name} не сработала: {e}")
                     continue
             
@@ -300,6 +323,95 @@ class TelegramCopierV3:
                     
         except Exception as e:
             self.logger.debug(f"❌ Ошибка peer resolver: {e}")
+            return None
+    
+    async def _get_entity_legacy_mode(self, entity_id: Union[str, int]):
+        """НОВОЕ: Поиск entity в режиме совместимости со старыми версиями."""
+        try:
+            self.logger.debug("🔄 Режим совместимости со старыми версиями...")
+            
+            # Стратегия 1: Прямой поиск как в старых версиях
+            try:
+                return await self.client.get_entity(entity_id)
+            except Exception:
+                pass
+            
+            # Стратегия 2: Поиск через InputPeerChannel (как в v2)
+            if isinstance(entity_id, int):
+                try:
+                    from telethon.tl.types import InputPeerChannel
+                    from telethon.utils import get_peer_id, resolve_id
+                    
+                    # Пробуем разные варианты ID
+                    channel_ids_to_try = [
+                        entity_id,
+                        abs(entity_id),
+                        entity_id + 1000000000000,  # Добавляем offset как в старых версиях
+                    ]
+                    
+                    for channel_id in channel_ids_to_try:
+                        try:
+                            peer = InputPeerChannel(channel_id, 0)  # access_hash = 0 для попытки
+                            result = await self.client(functions.channels.GetChannelsRequest([peer]))
+                            if result.chats:
+                                return result.chats[0]
+                        except Exception:
+                            continue
+                            
+                except Exception:
+                    pass
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"❌ Ошибка legacy mode: {e}")
+            return None
+    
+    async def _get_entity_force_fetch(self, entity_id: Union[str, int]):
+        """НОВОЕ: Принудительный поиск через различные API методы."""
+        try:
+            self.logger.debug("🔄 Принудительный поиск через API...")
+            
+            # Метод 1: Через GetDialogsRequest с принудительной загрузкой
+            try:
+                from telethon.tl.functions.messages import GetDialogsRequest
+                from telethon.tl.types import InputPeerEmpty
+                
+                result = await self.client(GetDialogsRequest(
+                    offset_date=None,
+                    offset_id=0,
+                    offset_peer=InputPeerEmpty(),
+                    limit=200,
+                    hash=0
+                ))
+                
+                # Ищем среди загруженных чатов
+                for chat in result.chats:
+                    if self._match_entity(chat, entity_id):
+                        return chat
+                        
+            except Exception:
+                pass
+            
+            # Метод 2: Прямой запрос к GetFullChannelRequest
+            if isinstance(entity_id, int):
+                try:
+                    from telethon.tl.types import PeerChannel
+                    from telethon.tl.functions.channels import GetFullChannelRequest
+                    
+                    peer = PeerChannel(abs(entity_id))
+                    full_channel = await self.client(GetFullChannelRequest(peer))
+                    
+                    if hasattr(full_channel, 'chats') and full_channel.chats:
+                        return full_channel.chats[0]
+                        
+                except Exception:
+                    pass
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"❌ Ошибка force fetch: {e}")
             return None
 
     async def _get_entity_via_dialogs(self, entity_id: Union[str, int]):

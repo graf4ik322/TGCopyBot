@@ -26,8 +26,12 @@ class Config:
         self.phone: str = os.getenv('PHONE', '')
         
         # Groups configuration
-        self.source_group_id: str = os.getenv('SOURCE_GROUP_ID', '')
-        self.target_group_id: str = os.getenv('TARGET_GROUP_ID', '')
+        source_id_str = os.getenv('SOURCE_GROUP_ID', '')
+        target_id_str = os.getenv('TARGET_GROUP_ID', '')
+        
+        # ИСПРАВЛЕНО: Автоматическое преобразование числовых ID в int
+        self.source_group_id = self._parse_entity_id(source_id_str)
+        self.target_group_id = self._parse_entity_id(target_id_str)
         
         # Behavior settings
         self.delay_seconds: int = int(os.getenv('DELAY_SECONDS', '3'))
@@ -93,6 +97,42 @@ class Config:
             return False
         
         return True
+    
+    def _parse_entity_id(self, entity_str: str):
+        """
+        НОВОЕ: Парсинг entity ID с автоматическим определением типа.
+        
+        Args:
+            entity_str: Строка с ID канала (числовой или username)
+            
+        Returns:
+            int для числовых ID, str для username
+        """
+        if not entity_str:
+            return ''
+            
+        entity_str = entity_str.strip()
+        
+        # Если начинается с @, то это username
+        if entity_str.startswith('@'):
+            return entity_str
+            
+        # Если начинается с -100, то это числовой ID суперчата
+        if entity_str.startswith('-100'):
+            try:
+                return int(entity_str)
+            except ValueError:
+                return entity_str
+                
+        # Если это просто число (положительное или отрицательное)
+        if entity_str.lstrip('-').isdigit():
+            try:
+                return int(entity_str)
+            except ValueError:
+                return entity_str
+                
+        # Иначе считаем username без @
+        return entity_str
     
     def get_proxy_config(self) -> Optional[dict]:
         """
