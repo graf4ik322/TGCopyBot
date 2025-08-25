@@ -579,6 +579,8 @@ class TelegramCopierV3:
         Выполняется только один раз при первом запуске.
         """
         try:
+            self.logger.info("🔍 Начинаем проверку состояния сканирования...")
+            
             # Проверяем, было ли уже выполнено сканирование
             cursor = self.db_connection.execute("""
                 SELECT scan_completed FROM copy_state WHERE channel_id = ?
@@ -590,28 +592,80 @@ class TelegramCopierV3:
                 return True
             
             self.logger.info("🔍 Начинаем полное сканирование канала...")
+            self.logger.info(f"📡 Источник: {getattr(self.source_entity, 'title', 'N/A')} (ID: {self.source_entity.id})")
+            
+            # Проверяем доступ к каналу
+            try:
+                self.logger.info("🔍 Проверяем доступ к каналу...")
+                test_messages = await self.client.get_messages(self.source_entity, limit=1)
+                if test_messages:
+                    self.logger.info(f"✅ Доступ к каналу подтвержден, последнее сообщение: {test_messages[0].id}")
+                else:
+                    self.logger.warning("⚠️ Канал пустой или нет доступа к сообщениям")
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка доступа к каналу: {e}")
+                return False
             
             total_messages = 0
             total_comments = 0
+            last_message_id = None
+            start_time = datetime.now()
+            last_progress_time = start_time
+            
+            self.logger.info("🔄 Начинаем итерацию по сообщениям канала...")
+            self.logger.info("💡 Будет показан прогресс каждые 10 сообщений")
             
             # Сканируем все сообщения канала
-            async for message in self.client.iter_messages(self.source_entity):
-                if self.stop_requested:
-                    break
-                
-                await self._save_post_to_db(message)
-                total_messages += 1
-                
-                # Сканируем комментарии для этого сообщения
-                if message.replies and message.replies.comments:
-                    comments = await self._get_comments_for_post(message)
-                    for comment in comments:
-                        await self._save_comment_to_db(comment, message.id)
-                        total_comments += 1
-                
-                # Логируем прогресс
-                if total_messages % 100 == 0:
-                    self.logger.info(f"📊 Сканировано {total_messages} постов, {total_comments} комментариев")
+            try:
+                async for message in self.client.iter_messages(self.source_entity):
+                    if self.stop_requested:
+                        self.logger.info("⏹️ Получен запрос на остановку сканирования")
+                        break
+                    
+                    # Детальная информация о сообщении
+                    self.logger.debug(f"📝 Обрабатываем сообщение {message.id}: {message.date}")
+                    last_message_id = message.id
+                    
+                    # Сохраняем пост в БД
+                    await self._save_post_to_db(message)
+                    total_messages += 1
+                    
+                    # Сканируем комментарии для этого сообщения
+                    if message.replies and message.replies.comments:
+                        self.logger.debug(f"💬 Сообщение {message.id} имеет {message.replies.replies} комментариев")
+                        try:
+                            comments = await self._get_comments_for_post(message)
+                            self.logger.debug(f"📥 Получено {len(comments)} комментариев для поста {message.id}")
+                            
+                            for comment in comments:
+                                await self._save_comment_to_db(comment, message.id)
+                                total_comments += 1
+                                
+                        except Exception as e:
+                            self.logger.warning(f"⚠️ Ошибка получения комментариев для поста {message.id}: {e}")
+                    
+                    # Показываем "живость" процесса каждые 30 секунд даже без новых сообщений
+                    current_time = datetime.now()
+                    if (current_time - last_progress_time).total_seconds() > 30:
+                        self.logger.info(f"⏳ Процесс активен: обработано {total_messages} постов, последний ID: {last_message_id}")
+                        last_progress_time = current_time
+                    
+                    # Логируем прогресс каждые 10 сообщений для лучшей видимости
+                    if total_messages % 10 == 0:
+                        elapsed_time = datetime.now() - start_time
+                        rate = total_messages / elapsed_time.total_seconds() if elapsed_time.total_seconds() > 0 else 0
+                        self.logger.info(f"📊 Прогресс: {total_messages} постов, {total_comments} комментариев | Скорость: {rate:.1f} сообщ/сек | Последний ID: {last_message_id}")
+                        last_progress_time = current_time
+                    
+                    # Подробный лог каждые 100 сообщений
+                    if total_messages % 100 == 0:
+                        elapsed_time = datetime.now() - start_time
+                        self.logger.info(f"🕒 Время сканирования: {elapsed_time} | Обработано: {total_messages} постов")
+                        
+            except Exception as e:
+                self.logger.error(f"❌ Ошибка во время итерации по сообщениям: {e}")
+                self.logger.error(f"📊 На момент ошибки обработано: {total_messages} постов, {total_comments} комментариев")
+                raise
             
             # Отмечаем сканирование как завершенное
             self.db_connection.execute("""
@@ -632,6 +686,7 @@ class TelegramCopierV3:
     async def _save_post_to_db(self, message: Message):
         """Сохранение поста в базу данных."""
         try:
+            self.logger.debug(f"💾 Сохраняем пост {message.id} в БД")
             # Подготовка данных медиа
             media_type = None
             media_data = {}
@@ -688,12 +743,15 @@ class TelegramCopierV3:
                 })
             ))
             
+            self.logger.debug(f"✅ Пост {message.id} сохранен в БД")
+            
         except Exception as e:
             self.logger.error(f"❌ Ошибка сохранения поста {message.id}: {e}")
     
     async def _save_comment_to_db(self, comment: Message, post_id: int):
         """Сохранение комментария в базу данных."""
         try:
+            self.logger.debug(f"💾 Сохраняем комментарий {comment.id} для поста {post_id}")
             # Подготовка данных медиа
             media_type = None
             media_data = {}
@@ -752,6 +810,8 @@ class TelegramCopierV3:
                 })
             ))
             
+            self.logger.debug(f"✅ Комментарий {comment.id} сохранен в БД")
+            
         except Exception as e:
             self.logger.error(f"❌ Ошибка сохранения комментария {comment.id}: {e}")
     
@@ -760,19 +820,37 @@ class TelegramCopierV3:
         comments = []
         
         try:
-            if not self.discussion_entity or not post.replies or not post.replies.comments:
+            self.logger.debug(f"🔍 Получаем комментарии для поста {post.id}")
+            
+            if not self.discussion_entity:
+                self.logger.debug(f"⚠️ Discussion entity не найдена для поста {post.id}")
                 return comments
+                
+            if not post.replies or not post.replies.comments:
+                self.logger.debug(f"📭 Пост {post.id} не имеет комментариев")
+                return comments
+            
+            self.logger.debug(f"💬 Пост {post.id} имеет {post.replies.replies} комментариев, ищем их...")
             
             # Ищем связанное сообщение в discussion group
             discussion_message_id = await self._find_discussion_message_id(post)
             
             if discussion_message_id:
+                self.logger.debug(f"🔗 Найдено связанное сообщение {discussion_message_id} для поста {post.id}")
+                
+                comment_count = 0
                 # Получаем все комментарии
                 async for comment in self.client.iter_messages(
                     self.discussion_entity, 
                     reply_to=discussion_message_id
                 ):
                     comments.append(comment)
+                    comment_count += 1
+                    self.logger.debug(f"📝 Найден комментарий {comment.id} для поста {post.id}")
+                
+                self.logger.debug(f"✅ Получено {comment_count} комментариев для поста {post.id}")
+            else:
+                self.logger.debug(f"⚠️ Не найдено связанное сообщение в discussion group для поста {post.id}")
             
         except Exception as e:
             self.logger.warning(f"⚠️ Ошибка получения комментариев для поста {post.id}: {e}")

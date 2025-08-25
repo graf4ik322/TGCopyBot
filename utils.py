@@ -14,7 +14,7 @@ from typing import Optional, Union, Set, Dict, Any
 from telethon.errors import FloodWaitError, PeerFloodError
 
 
-def setup_logging(log_level: str = 'INFO') -> logging.Logger:
+def setup_logging(log_level: str = 'DEBUG') -> logging.Logger:
     """
     Настройка системы логирования.
     
