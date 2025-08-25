@@ -42,10 +42,18 @@ class TelegramCopierAppV3:
     async def run(self) -> bool:
         """Главный цикл выполнения."""
         try:
-            # Валидация конфигурации
+            # ИСПРАВЛЕНО: Улучшенная валидация конфигурации с детальными сообщениями
             if not self.config.validate():
                 self.logger.error("❌ Ошибка валидации конфигурации")
+                self.logger.error("💡 Проверьте переменные окружения или .env файл:")
+                self.logger.error("   - API_ID и API_HASH получите на https://my.telegram.org")
+                self.logger.error("   - SOURCE_GROUP_ID: ID или @username исходного канала")
+                self.logger.error("   - TARGET_GROUP_ID: ID или @username целевого канала")
+                self.logger.error("   - PHONE: номер телефона в международном формате")
                 return False
+            
+            # НОВОЕ: Проверка критических переменных окружения перед запуском
+            self._check_environment()
             
             # Блокировка для предотвращения множественного запуска
             with ProcessLock():
@@ -73,6 +81,34 @@ class TelegramCopierAppV3:
         
         return True
     
+    def _check_environment(self):
+        """НОВОЕ: Проверка переменных окружения и вывод диагностической информации."""
+        self.logger.info("🔍 Проверка конфигурации:")
+        
+        # Проверяем наличие критических переменных
+        env_vars = {
+            'API_ID': self.config.api_id,
+            'API_HASH': self.config.api_hash,
+            'SOURCE_GROUP_ID': self.config.source_group_id, 
+            'TARGET_GROUP_ID': self.config.target_group_id,
+            'PHONE': self.config.phone
+        }
+        
+        for var_name, var_value in env_vars.items():
+            if var_value:
+                # Маскируем чувствительные данные
+                if var_name in ['API_HASH', 'PHONE']:
+                    masked_value = f"{str(var_value)[:3]}***{str(var_value)[-3:]}" if len(str(var_value)) > 6 else "***"
+                    self.logger.info(f"   ✅ {var_name}: {masked_value}")
+                else:
+                    self.logger.info(f"   ✅ {var_name}: {var_value}")
+            else:
+                self.logger.warning(f"   ❌ {var_name}: не задан")
+        
+        # Дополнительные настройки
+        self.logger.info(f"   📊 Режим: {'DRY RUN (тестовый)' if self.config.dry_run else 'LIVE (реальный)'}")
+        self.logger.info(f"   ⏱️ Задержка: {self.config.delay_seconds}с между сообщениями")
+        
     async def _initialize_client(self):
         """Инициализация Telegram клиента."""
         try:

@@ -116,17 +116,37 @@ class TelegramCopierV3:
             # Инициализация базы данных
             self._init_database()
             
+            # НОВОЕ: Вывод диагностической информации
+            self.logger.info(f"🔧 Инициализация копировщика:")
+            self.logger.info(f"   Исходный канал: {self.source_channel_id} (тип: {type(self.source_channel_id).__name__})")
+            self.logger.info(f"   Целевой канал: {self.target_channel_id} (тип: {type(self.target_channel_id).__name__})")
+            self.logger.info(f"   Режим: {'Тест (DRY RUN)' if self.dry_run else 'Реальное копирование'}")
+            
+            # ИСПРАВЛЕНО: Предварительная проверка соединения с Telegram
+            try:
+                me = await self.client.get_me()
+                self.logger.info(f"👤 Авторизован как: {me.first_name} (@{me.username or 'без username'})")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Не удалось получить информацию о пользователе: {e}")
+            
             # ИСПРАВЛЕНО: Безопасное получение entities каналов с retry
+            self.logger.info("🔍 Поиск исходного канала...")
             self.source_entity = await self._get_entity_safe(self.source_channel_id, "исходного канала")
+            
+            self.logger.info("🔍 Поиск целевого канала...")
             self.target_entity = await self._get_entity_safe(self.target_channel_id, "целевого канала")
             
-            self.logger.info(f"✅ Источник: {getattr(self.source_entity, 'title', 'N/A')}")
-            self.logger.info(f"✅ Цель: {getattr(self.target_entity, 'title', 'N/A')}")
+            # НОВОЕ: Подробная информация о найденных каналах
+            self.logger.info(f"✅ Источник: {getattr(self.source_entity, 'title', 'N/A')} (ID: {getattr(self.source_entity, 'id', 'N/A')})")
+            self.logger.info(f"✅ Цель: {getattr(self.target_entity, 'title', 'N/A')} (ID: {getattr(self.target_entity, 'id', 'N/A')})")
+            
+            # НОВОЕ: Проверка прав доступа к каналам
+            await self._verify_channel_access()
             
             # Попытка найти discussion groups
             await self._find_discussion_groups()
             
-            self.logger.info("✅ Копировщик v3.0 инициализирован")
+            self.logger.info("✅ Копировщик v3.0 инициализирован успешно")
             
         except Exception as e:
             self.logger.error(f"❌ Ошибка инициализации: {e}")
@@ -134,7 +154,7 @@ class TelegramCopierV3:
     
     async def _get_entity_safe(self, entity_id: Union[str, int], entity_name: str, max_retries: int = 5):
         """
-        НОВОЕ: Безопасное получение entity с retry механизмом.
+        ИСПРАВЛЕНО: Безопасное получение entity с улучшенным алгоритмом поиска.
         
         Args:
             entity_id: ID или username entity
@@ -152,11 +172,30 @@ class TelegramCopierV3:
         
         self.logger.info(f"🔍 Поиск {entity_name}: {entity_id}")
         
-        # Стратегии поиска
+        # ИСПРАВЛЕНО: Преобразование строкового ID в число, если необходимо
+        processed_entity_id = entity_id
+        if isinstance(entity_id, str) and entity_id.lstrip('-').isdigit():
+            processed_entity_id = int(entity_id)
+            self.logger.debug(f"Преобразован строковый ID в число: {entity_id} -> {processed_entity_id}")
+        
+        # ИСПРАВЛЕНО: Обязательная предварительная синхронизация диалогов
+        try:
+            self.logger.info(f"📡 Синхронизация диалогов для поиска {entity_name}...")
+            await self.client.get_dialogs(limit=None)  # Загружаем ВСЕ диалоги
+            self.logger.debug("✅ Диалоги синхронизированы")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Ошибка синхронизации диалогов: {e}")
+        
+        # ИСПРАВЛЕНО: Улучшенные стратегии поиска с дополнительными методами
         strategies = [
-            lambda: self.client.get_entity(entity_id),
-            lambda: self._get_entity_via_dialogs(entity_id),
-            lambda: self._get_entity_via_search(entity_id)
+            # Стратегия 1: Прямой поиск по ID/username
+            lambda: self.client.get_entity(processed_entity_id),
+            # Стратегия 2: Поиск через диалоги после синхронизации
+            lambda: self._get_entity_via_dialogs(processed_entity_id),
+            # Стратегия 3: Поиск через API search (для username)
+            lambda: self._get_entity_via_search(processed_entity_id),
+            # Стратегия 4: Попытка присоединения к каналу (если возможно)
+            lambda: self._get_entity_via_join(processed_entity_id)
         ]
         
         last_exception = None
@@ -168,27 +207,38 @@ class TelegramCopierV3:
                 try:
                     entity = await strategy()
                     if entity:
-                        self.logger.info(f"✅ {entity_name} найден (стратегия {strategy_idx + 1})")
+                        self.logger.info(f"✅ {entity_name} найден (стратегия {strategy_idx + 1}): {getattr(entity, 'title', 'N/A')}")
                         return entity
                         
                 except (FloodWaitError, PeerFloodError) as e:
                     wait_time = getattr(e, 'seconds', 30)
-                    self.logger.warning(f"FloodWait для {entity_name}: ожидание {wait_time}с")
+                    self.logger.warning(f"⏳ FloodWait для {entity_name}: ожидание {wait_time}с")
                     await asyncio.sleep(wait_time)
                     
                 except Exception as e:
                     last_exception = e
-                    self.logger.debug(f"Стратегия {strategy_idx + 1} для {entity_name} не сработала: {e}")
+                    self.logger.debug(f"❌ Стратегия {strategy_idx + 1} для {entity_name} не сработала: {e}")
                     continue
             
-            # Пауза между попытками
+            # Прогрессивная пауза между попытками
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                wait_time = min(2 ** attempt, 30)  # Максимум 30 секунд
+                self.logger.debug(f"⏳ Пауза {wait_time}с перед следующей попыткой")
+                await asyncio.sleep(wait_time)
         
-        # Все попытки исчерпаны
+        # Все попытки исчерпаны - формируем детальное сообщение об ошибке
         error_msg = f"Entity {entity_name} ({entity_id}) не найдена после {max_retries} попыток"
         if last_exception:
             error_msg += f". Последняя ошибка: {last_exception}"
+        
+        # ИСПРАВЛЕНО: Добавляем рекомендации по устранению проблемы
+        recommendations = [
+            "1. Убедитесь, что ID канала указан правильно",
+            "2. Проверьте, что аккаунт имеет доступ к каналу",
+            "3. Для приватных каналов убедитесь, что вы участник",
+            "4. Проверьте, что канал существует и не был удален"
+        ]
+        error_msg += f"\n\nРекомендации:\n" + "\n".join(recommendations)
         
         raise Exception(error_msg)
     
@@ -234,6 +284,86 @@ class TelegramCopierV3:
             pass
             
         return None
+    
+    async def _get_entity_via_join(self, entity_id: Union[str, int]):
+        """
+        НОВОЕ: Попытка получения entity через присоединение к каналу.
+        Осторожно используется только для публичных каналов.
+        """
+        try:
+            # Работает только с числовыми ID каналов
+            if not isinstance(entity_id, int) or entity_id >= 0:
+                return None
+                
+            # Попробуем создать PeerChannel и получить полную информацию
+            from telethon.tl.types import PeerChannel
+            from telethon.tl.functions.channels import GetFullChannelRequest
+            
+            # Извлекаем чистый channel_id из полного ID
+            # Полный ID канала: -100XXXXXXXXX
+            # Нужно убрать префикс -100
+            if str(entity_id).startswith('-100'):
+                channel_id = int(str(entity_id)[4:])  # Убираем -100
+                
+                peer = PeerChannel(channel_id)
+                
+                # Пытаемся получить полную информацию о канале
+                try:
+                    full_channel = await self.client(GetFullChannelRequest(peer))
+                    return full_channel.chats[0] if full_channel.chats else None
+                except Exception:
+                    # Если не удалось получить через GetFullChannelRequest,
+                    # пытаемся через обычный get_entity с PeerChannel
+                    return await self.client.get_entity(peer)
+                    
+        except Exception as e:
+            self.logger.debug(f"_get_entity_via_join не сработал: {e}")
+            
+        return None
+    
+    async def _verify_channel_access(self):
+        """
+        НОВОЕ: Проверка прав доступа к каналам и их базовой информации.
+        """
+        try:
+            # Проверка исходного канала
+            if hasattr(self.source_entity, 'participants_count'):
+                self.logger.info(f"📊 Исходный канал: {self.source_entity.participants_count} участников")
+            
+            # Проверка возможности чтения из исходного канала
+            try:
+                # Пытаемся получить последние сообщения
+                messages = await self.client.get_messages(self.source_entity, limit=1)
+                if messages:
+                    self.logger.info("✅ Доступ на чтение из исходного канала подтвержден")
+                else:
+                    self.logger.warning("⚠️ Исходный канал пуст или нет доступа к сообщениям")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Ограниченный доступ к исходному каналу: {e}")
+            
+            # Проверка целевого канала
+            if hasattr(self.target_entity, 'participants_count'):
+                self.logger.info(f"📊 Целевой канал: {self.target_entity.participants_count} участников")
+            
+            # Проверка возможности записи в целевой канал
+            try:
+                # Проверяем права администратора (если применимо)
+                if hasattr(self.target_entity, 'admin_rights'):
+                    rights = self.target_entity.admin_rights
+                    if rights and rights.post_messages:
+                        self.logger.info("✅ Права на отправку сообщений в целевой канал подтверждены")
+                    else:
+                        self.logger.warning("⚠️ Может отсутствовать право на отправку сообщений в целевой канал")
+                        
+                # Для дополнительной проверки попробуем отправить тестовое сообщение (только в dry-run)
+                if self.dry_run:
+                    self.logger.info("🧪 В режиме тестирования - проверка записи пропущена")
+                    
+            except Exception as e:
+                self.logger.warning(f"⚠️ Ошибка проверки прав на целевой канал: {e}")
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Ошибка проверки доступа к каналам: {e}")
     
     def _match_entity(self, entity, target_id: Union[str, int]) -> bool:
         """Проверка соответствия entity целевому ID."""

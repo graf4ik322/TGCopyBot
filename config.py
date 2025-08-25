@@ -4,7 +4,7 @@
 """
 
 import os
-from typing import Optional
+from typing import Optional, Union
 from dotenv import load_dotenv
 
 
@@ -25,9 +25,9 @@ class Config:
         self.api_hash: str = os.getenv('API_HASH', '')
         self.phone: str = os.getenv('PHONE', '')
         
-        # Groups configuration
-        self.source_group_id: str = os.getenv('SOURCE_GROUP_ID', '')
-        self.target_group_id: str = os.getenv('TARGET_GROUP_ID', '')
+        # Groups configuration - ИСПРАВЛЕНО: Правильная обработка ID каналов
+        self.source_group_id: Union[int, str] = self._parse_channel_id(os.getenv('SOURCE_GROUP_ID', ''))
+        self.target_group_id: Union[int, str] = self._parse_channel_id(os.getenv('TARGET_GROUP_ID', ''))
         
         # Behavior settings
         self.delay_seconds: int = int(os.getenv('DELAY_SECONDS', '3'))
@@ -93,6 +93,30 @@ class Config:
             return False
         
         return True
+    
+    def _parse_channel_id(self, value: str) -> Union[int, str]:
+        """
+        НОВОЕ: Парсинг ID канала из строки в правильный формат.
+        
+        Args:
+            value: Строка с ID канала или username
+            
+        Returns:
+            int для числовых ID, str для username
+        """
+        if not value:
+            return value
+            
+        # Если это username (начинается с @)
+        if value.startswith('@'):
+            return value
+            
+        # Если это числовой ID (может содержать - в начале)
+        if value.lstrip('-').isdigit():
+            return int(value)
+            
+        # Возвращаем как есть для других случаев
+        return value
     
     def get_proxy_config(self) -> Optional[dict]:
         """
