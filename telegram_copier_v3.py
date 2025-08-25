@@ -21,6 +21,8 @@ import tempfile
 from typing import List, Dict, Optional, Any, Tuple, Union
 from datetime import datetime, timezone
 from dataclasses import dataclass
+import time  # Для измерения времени операций
+import psutil  # Для мониторинга памяти
 
 from telethon import TelegramClient, events
 from telethon.tl.types import (
@@ -111,6 +113,13 @@ class TelegramCopierV3:
         
         # Флаг остановки
         self.stop_requested = False
+        
+        # Мониторинг производительности
+        self.performance_stats = {
+            'batch_times': [],
+            'memory_usage': [],
+            'api_call_times': []
+        }
     
     async def initialize(self):
         """ИСПРАВЛЕНО: Инициализация копировщика с улучшенной обработкой entities."""
@@ -594,14 +603,32 @@ class TelegramCopierV3:
             self.logger.info("🔍 Начинаем полное сканирование канала...")
             self.logger.info(f"📡 Источник: {getattr(self.source_entity, 'title', 'N/A')} (ID: {self.source_entity.id})")
             
-            # Проверяем доступ к каналу
+            # ИСПРАВЛЕНО: Расширенная проверка доступа к каналу с таймаутом
             try:
-                self.logger.info("🔍 Проверяем доступ к каналу...")
-                test_messages = await self.client.get_messages(self.source_entity, limit=1)
+                self.logger.info("🔍 Проверяем доступ к каналу с таймаутом...")
+                
+                # Добавляем таймаут на проверку доступа
+                test_messages = await asyncio.wait_for(
+                    self.client.get_messages(self.source_entity, limit=1),
+                    timeout=30  # 30 секунд максимум
+                )
+                
                 if test_messages:
                     self.logger.info(f"✅ Доступ к каналу подтвержден, последнее сообщение: {test_messages[0].id}")
+                    
+                    # Дополнительная информация о канале
+                    channel_info = await asyncio.wait_for(
+                        self.client.get_entity(self.source_entity.id),
+                        timeout=15
+                    )
+                    self.logger.info(f"📊 Инфо о канале: {getattr(channel_info, 'title', 'N/A')} | Участников: {getattr(channel_info, 'participants_count', 'N/A')}")
+                    
                 else:
                     self.logger.warning("⚠️ Канал пустой или нет доступа к сообщениям")
+                    
+            except asyncio.TimeoutError:
+                self.logger.error("⏰ Таймаут при проверке доступа к каналу")
+                return False
             except Exception as e:
                 self.logger.error(f"❌ Ошибка доступа к каналу: {e}")
                 return False
@@ -615,52 +642,107 @@ class TelegramCopierV3:
             self.logger.info("🔄 Начинаем итерацию по сообщениям канала...")
             self.logger.info("💡 Будет показан прогресс каждые 10 сообщений")
             
-            # Сканируем все сообщения канала
+            # ИСПРАВЛЕНО: Сканируем все сообщения канала с батчевой обработкой и таймаутами
             try:
-                async for message in self.client.iter_messages(self.source_entity):
+                # Батчевая обработка с ограничениями для предотвращения зависания
+                batch_size = 100  # Обрабатываем по 100 сообщений за раз
+                offset_id = 0
+                batch_count = 0
+                max_batches_without_progress = 5  # Максимум батчей без прогресса
+                batches_without_progress = 0
+                
+                self.logger.info(f"🔄 Используем батчевую обработку: {batch_size} сообщений за раз")
+                
+                while True:
                     if self.stop_requested:
                         self.logger.info("⏹️ Получен запрос на остановку сканирования")
                         break
                     
-                    # Детальная информация о сообщении
-                    self.logger.debug(f"📝 Обрабатываем сообщение {message.id}: {message.date}")
-                    last_message_id = message.id
+                    batch_start_time = datetime.now()
+                    batch_messages = 0
+                    batch_comments = 0
                     
-                    # Сохраняем пост в БД
-                    await self._save_post_to_db(message)
-                    total_messages += 1
+                    self.logger.info(f"📦 Обрабатываем батч {batch_count + 1}, начиная с offset_id: {offset_id}")
                     
-                    # Сканируем комментарии для этого сообщения
-                    if message.replies and message.replies.comments:
-                        self.logger.debug(f"💬 Сообщение {message.id} имеет {message.replies.replies} комментариев")
-                        try:
-                            comments = await self._get_comments_for_post(message)
-                            self.logger.debug(f"📥 Получено {len(comments)} комментариев для поста {message.id}")
+                    try:
+                        # ИСПРАВЛЕНО: Добавляем timeout и limit для предотвращения зависания
+                        messages_in_batch = []
+                        async for message in self.client.iter_messages(
+                            self.source_entity, 
+                            limit=batch_size,
+                            offset_id=offset_id,
+                            wait_time=30  # Максимальное время ожидания 30 секунд
+                        ):
+                            messages_in_batch.append(message)
                             
-                            for comment in comments:
-                                await self._save_comment_to_db(comment, message.id)
-                                total_comments += 1
+                        if not messages_in_batch:
+                            self.logger.info("✅ Достигнут конец канала - все сообщения обработаны")
+                            break
+                            
+                        # Сбрасываем счетчик батчей без прогресса
+                        batches_without_progress = 0
+                        
+                        # Обрабатываем сообщения из батча
+                        for message in messages_in_batch:
+                            if self.stop_requested:
+                                break
                                 
-                        except Exception as e:
-                            self.logger.warning(f"⚠️ Ошибка получения комментариев для поста {message.id}: {e}")
-                    
-                    # Показываем "живость" процесса каждые 30 секунд даже без новых сообщений
-                    current_time = datetime.now()
-                    if (current_time - last_progress_time).total_seconds() > 30:
-                        self.logger.info(f"⏳ Процесс активен: обработано {total_messages} постов, последний ID: {last_message_id}")
-                        last_progress_time = current_time
-                    
-                    # Логируем прогресс каждые 10 сообщений для лучшей видимости
-                    if total_messages % 10 == 0:
-                        elapsed_time = datetime.now() - start_time
-                        rate = total_messages / elapsed_time.total_seconds() if elapsed_time.total_seconds() > 0 else 0
-                        self.logger.info(f"📊 Прогресс: {total_messages} постов, {total_comments} комментариев | Скорость: {rate:.1f} сообщ/сек | Последний ID: {last_message_id}")
-                        last_progress_time = current_time
-                    
-                    # Подробный лог каждые 100 сообщений
-                    if total_messages % 100 == 0:
-                        elapsed_time = datetime.now() - start_time
-                        self.logger.info(f"🕒 Время сканирования: {elapsed_time} | Обработано: {total_messages} постов")
+                            # Детальная информация о сообщении
+                            self.logger.debug(f"📝 Обрабатываем сообщение {message.id}: {message.date}")
+                            last_message_id = message.id
+                            offset_id = message.id  # Обновляем offset для следующего батча
+                            
+                            # Сохраняем пост в БД
+                            await self._save_post_to_db(message)
+                            total_messages += 1
+                            batch_messages += 1
+                            
+                            # Сканируем комментарии для этого сообщения
+                            if message.replies and message.replies.comments:
+                                self.logger.debug(f"💬 Сообщение {message.id} имеет {message.replies.replies} комментариев")
+                                try:
+                                    comments = await self._get_comments_for_post(message)
+                                    self.logger.debug(f"📥 Получено {len(comments)} комментариев для поста {message.id}")
+                                    
+                                    for comment in comments:
+                                        await self._save_comment_to_db(comment, message.id)
+                                        total_comments += 1
+                                        batch_comments += 1
+                                        
+                                except Exception as e:
+                                    self.logger.warning(f"⚠️ Ошибка получения комментариев для поста {message.id}: {e}")
+                            
+                            # Показываем прогресс каждые 10 сообщений
+                            if total_messages % 10 == 0:
+                                current_time = datetime.now()
+                                elapsed_time = current_time - start_time
+                                rate = total_messages / elapsed_time.total_seconds() if elapsed_time.total_seconds() > 0 else 0
+                                self.logger.info(f"📊 Прогресс: {total_messages} постов, {total_comments} комментариев | Скорость: {rate:.1f} сообщ/сек | Последний ID: {last_message_id}")
+                        
+                        # Статистика батча
+                        batch_time = datetime.now() - batch_start_time
+                        batch_count += 1
+                        self.logger.info(f"✅ Батч {batch_count} завершен: {batch_messages} сообщений, {batch_comments} комментариев за {batch_time.total_seconds():.1f}с")
+                        
+                        # Пауза между батчами для снижения нагрузки
+                        await asyncio.sleep(1)
+                        
+                    except asyncio.TimeoutError:
+                        self.logger.warning(f"⏰ Таймаут при обработке батча {batch_count + 1}, пропускаем")
+                        batches_without_progress += 1
+                        if batches_without_progress >= max_batches_without_progress:
+                            self.logger.error(f"❌ Превышено максимальное количество батчей без прогресса ({max_batches_without_progress})")
+                            break
+                        continue
+                        
+                    except Exception as e:
+                        self.logger.error(f"❌ Ошибка в батче {batch_count + 1}: {e}")
+                        batches_without_progress += 1
+                        if batches_without_progress >= max_batches_without_progress:
+                            self.logger.error(f"❌ Превышено максимальное количество ошибок подряд")
+                            break
+                        await asyncio.sleep(5)  # Пауза перед повтором
+                        continue
                         
             except Exception as e:
                 self.logger.error(f"❌ Ошибка во время итерации по сообщениям: {e}")
@@ -839,13 +921,26 @@ class TelegramCopierV3:
                 self.logger.debug(f"🔗 Найдено связанное сообщение {discussion_message_id} для поста {post.id}")
                 
                 comment_count = 0
-                # Получаем все комментарии
-                async for comment in self.client.iter_messages(
-                    self.discussion_entity, 
-                    reply_to=discussion_message_id
-                ):
-                    comments.append(comment)
-                    comment_count += 1
+                # ИСПРАВЛЕНО: Получаем все комментарии с ограничениями и таймаутом
+                try:
+                    async for comment in self.client.iter_messages(
+                        self.discussion_entity, 
+                        reply_to=discussion_message_id,
+                        limit=1000,  # Ограничиваем максимум 1000 комментариев
+                        wait_time=30  # Максимум 30 секунд ожидания
+                    ):
+                        comments.append(comment)
+                        comment_count += 1
+                        
+                        # Прогресс для большого количества комментариев
+                        if comment_count % 50 == 0:
+                            self.logger.debug(f"💬 Получено {comment_count} комментариев для поста {post.id}")
+                            
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"⏰ Таймаут при получении комментариев для поста {post.id}")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Ошибка получения комментариев: {e}")
+                    # Продолжаем с уже полученными комментариями
                     self.logger.debug(f"📝 Найден комментарий {comment.id} для поста {post.id}")
                 
                 self.logger.debug(f"✅ Получено {comment_count} комментариев для поста {post.id}")
@@ -868,19 +963,37 @@ class TelegramCopierV3:
             except:
                 pass
             
-            # Метод 2: Поиск по forward header
-            async for message in self.client.iter_messages(self.discussion_entity, limit=200):
-                if (message.forward and 
-                    hasattr(message.forward, 'channel_post') and 
-                    message.forward.channel_post == post.id):
-                    return message.id
+            # Метод 2: Поиск по forward header (с таймаутом)
+            try:
+                async for message in self.client.iter_messages(
+                    self.discussion_entity, 
+                    limit=200,
+                    wait_time=15  # Максимум 15 секунд ожидания
+                ):
+                    if (message.forward and 
+                        hasattr(message.forward, 'channel_post') and 
+                        message.forward.channel_post == post.id):
+                        return message.id
+            except asyncio.TimeoutError:
+                self.logger.debug(f"⏰ Таймаут при поиске forward header для поста {post.id}")
+            except Exception as e:
+                self.logger.debug(f"⚠️ Ошибка поиска forward header: {e}")
             
-            # Метод 3: Поиск по содержимому (если есть текст)
+            # Метод 3: Поиск по содержимому (с таймаутом)
             if post.message and len(post.message.strip()) > 20:
                 search_text = post.message.strip()[:100]
-                async for message in self.client.iter_messages(self.discussion_entity, limit=100):
-                    if message.message and search_text in message.message:
-                        return message.id
+                try:
+                    async for message in self.client.iter_messages(
+                        self.discussion_entity, 
+                        limit=100,
+                        wait_time=10  # Максимум 10 секунд ожидания
+                    ):
+                        if message.message and search_text in message.message:
+                            return message.id
+                except asyncio.TimeoutError:
+                    self.logger.debug(f"⏰ Таймаут при поиске по содержимому для поста {post.id}")
+                except Exception as e:
+                    self.logger.debug(f"⚠️ Ошибка поиска по содержимому: {e}")
             
         except Exception as e:
             self.logger.warning(f"⚠️ Ошибка поиска discussion message для поста {post.id}: {e}")
