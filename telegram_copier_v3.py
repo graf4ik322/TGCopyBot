@@ -32,6 +32,7 @@ from telethon.tl.types import (
     MessageEntitySpoiler, MessageEntityBlockquote
 )
 from telethon.tl import functions
+from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
 
 
@@ -134,7 +135,7 @@ class TelegramCopierV3:
     
     async def _get_entity_safe(self, entity_id: Union[str, int], entity_name: str, max_retries: int = 5):
         """
-        НОВОЕ: Безопасное получение entity с retry механизмом.
+        УЛУЧШЕНО: Безопасное получение entity с расширенной диагностикой и проверкой доступа.
         
         Args:
             entity_id: ID или username entity
@@ -145,30 +146,35 @@ class TelegramCopierV3:
             Entity объект
             
         Raises:
-            Exception: Если entity не найдена после всех попыток
+            Exception: Если entity не найдена после всех попыток с детальной диагностикой
         """
-        from telethon.errors import FloodWaitError, PeerFloodError
+        from telethon.errors import FloodWaitError, PeerFloodError, ChannelPrivateError, ChannelInvalidError
         import asyncio
         
         self.logger.info(f"🔍 Поиск {entity_name}: {entity_id}")
         
-        # Стратегии поиска
+        # Сначала проверим доступные каналы пользователя
+        await self._validate_channel_access(entity_id, entity_name)
+        
+        # Стратегии поиска с улучшенной логикой
         strategies = [
-            lambda: self.client.get_entity(entity_id),
-            lambda: self._get_entity_via_dialogs(entity_id),
-            lambda: self._get_entity_via_search(entity_id)
+            ("Прямой get_entity", lambda: self.client.get_entity(entity_id)),
+            ("Поиск через диалоги", lambda: self._get_entity_via_dialogs(entity_id)),
+            ("Глобальный поиск", lambda: self._get_entity_via_search(entity_id)),
+            ("Поиск с принуждением", lambda: self._force_entity_resolution(entity_id))
         ]
         
         last_exception = None
+        all_errors = []
         
         for attempt in range(max_retries):
             self.logger.debug(f"Попытка {attempt + 1}/{max_retries} для {entity_name}")
             
-            for strategy_idx, strategy in enumerate(strategies):
+            for strategy_name, strategy in strategies:
                 try:
                     entity = await strategy()
                     if entity:
-                        self.logger.info(f"✅ {entity_name} найден (стратегия {strategy_idx + 1})")
+                        self.logger.info(f"✅ {entity_name} найден через: {strategy_name}")
                         return entity
                         
                 except (FloodWaitError, PeerFloodError) as e:
@@ -176,14 +182,25 @@ class TelegramCopierV3:
                     self.logger.warning(f"FloodWait для {entity_name}: ожидание {wait_time}с")
                     await asyncio.sleep(wait_time)
                     
+                except (ChannelPrivateError, ChannelInvalidError) as e:
+                    error_msg = f"❌ Канал {entity_id} недоступен: {e}"
+                    self.logger.error(error_msg)
+                    all_errors.append(f"{strategy_name}: {e}")
+                    break  # Нет смысла пробовать другие стратегии
+                    
                 except Exception as e:
                     last_exception = e
-                    self.logger.debug(f"Стратегия {strategy_idx + 1} для {entity_name} не сработала: {e}")
+                    error_detail = f"{strategy_name}: {e}"
+                    all_errors.append(error_detail)
+                    self.logger.debug(f"Стратегия '{strategy_name}' не сработала: {e}")
                     continue
             
             # Пауза между попытками
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
+        
+        # Генерируем детальную диагностику ошибки
+        await self._generate_detailed_error_report(entity_id, entity_name, all_errors)
         
         # Все попытки исчерпаны
         error_msg = f"Entity {entity_name} ({entity_id}) не найдена после {max_retries} попыток"
@@ -210,28 +227,62 @@ class TelegramCopierV3:
             return None
     
     async def _get_entity_via_search(self, entity_id: Union[str, int]):
-        """Поиск entity через глобальный поиск."""
+        """УЛУЧШЕНО: Поиск entity через глобальный поиск с расширенными методами."""
         try:
+            # Поиск по username
             if isinstance(entity_id, str) and entity_id.startswith('@'):
                 username = entity_id[1:]
                 
-                # Поиск через API
+                # Поиск через SearchRequest
                 result = await self.client(functions.contacts.SearchRequest(
                     q=username,
                     limit=10
                 ))
                 
-                # Проверяем результаты
+                # Проверяем результаты в чатах
                 for chat in result.chats:
-                    if hasattr(chat, 'username') and chat.username == username:
+                    if hasattr(chat, 'username') and chat.username and chat.username.lower() == username.lower():
                         return chat
                         
+                # Проверяем результаты в пользователях
                 for user in result.users:
-                    if hasattr(user, 'username') and user.username == username:
+                    if hasattr(user, 'username') and user.username and user.username.lower() == username.lower():
                         return user
-                        
-        except Exception:
-            pass
+                
+                # Дополнительный поиск через ResolveUsername
+                try:
+                    result = await self.client(ResolveUsernameRequest(username))
+                    if result.chats:
+                        return result.chats[0]
+                    if result.users:
+                        return result.users[0]
+                except Exception:
+                    pass
+            
+            # Поиск по ID через различные методы
+            elif isinstance(entity_id, (int, str)) and str(entity_id).lstrip('-').isdigit():
+                channel_id = int(entity_id)
+                
+                # Попытка через GetFullChannel для каналов
+                try:
+                    if channel_id < 0:  # Отрицательный ID - это канал/группа
+                        from telethon.tl.functions.channels import GetFullChannelRequest
+                        peer = PeerChannel(channel_id)
+                        full_channel = await self.client(GetFullChannelRequest(peer))
+                        return full_channel.chats[0] if full_channel.chats else None
+                except Exception:
+                    pass
+                
+                # Попытка через GetChats для обычных групп
+                try:
+                    from telethon.tl.functions.messages import GetChatsRequest
+                    result = await self.client(GetChatsRequest([abs(channel_id)]))
+                    return result.chats[0] if result.chats else None
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            self.logger.debug(f"Глобальный поиск не удался: {e}")
             
         return None
     
@@ -256,6 +307,122 @@ class TelegramCopierV3:
             pass
             
         return False
+    
+    async def _validate_channel_access(self, entity_id: Union[str, int], entity_name: str):
+        """
+        НОВОЕ: Проверка доступа к каналу перед попыткой получения entity.
+        """
+        self.logger.info(f"🔍 Проверка доступа к {entity_name}...")
+        
+        try:
+            # Получаем список доступных диалогов
+            dialogs = await self.client.get_dialogs(limit=200)
+            available_channels = []
+            
+            for dialog in dialogs:
+                if hasattr(dialog.entity, 'id'):
+                    available_channels.append({
+                        'id': dialog.entity.id,
+                        'title': getattr(dialog.entity, 'title', 'N/A'),
+                        'username': getattr(dialog.entity, 'username', None)
+                    })
+            
+            # Проверяем, есть ли искомый канал в списке
+            target_found = False
+            for channel in available_channels:
+                if self._match_entity_extended(channel, entity_id):
+                    target_found = True
+                    self.logger.info(f"✅ Канал найден в доступных: {channel['title']}")
+                    break
+            
+            if not target_found:
+                self.logger.warning(f"⚠️ Канал {entity_id} не найден в списке доступных!")
+                self.logger.info("📋 Доступные каналы:")
+                for channel in available_channels[:10]:  # Показываем только первые 10
+                    self.logger.info(f"   • {channel['id']} - {channel['title']}")
+                if len(available_channels) > 10:
+                    self.logger.info(f"   ... и еще {len(available_channels) - 10} каналов")
+                    
+        except Exception as e:
+            self.logger.debug(f"Не удалось проверить доступ к каналу: {e}")
+    
+    def _match_entity_extended(self, channel_info: dict, target_id: Union[str, int]) -> bool:
+        """Расширенная проверка соответствия канала."""
+        try:
+            # По ID
+            if isinstance(target_id, int):
+                return channel_info['id'] == target_id
+                
+            # По строковому ID
+            if isinstance(target_id, str):
+                if target_id.lstrip('-').isdigit():
+                    return channel_info['id'] == int(target_id)
+                    
+                # По username
+                if target_id.startswith('@'):
+                    username = target_id[1:]
+                else:
+                    username = target_id
+                    
+                return (channel_info.get('username', '').lower() == username.lower())
+                    
+        except Exception:
+            pass
+            
+        return False
+    
+    async def _force_entity_resolution(self, entity_id: Union[str, int]):
+        """
+        НОВОЕ: Принудительная попытка получения entity с дополнительными методами.
+        """
+        try:
+            # Попытка через конвертацию в PeerChannel
+            if isinstance(entity_id, int) or (isinstance(entity_id, str) and entity_id.lstrip('-').isdigit()):
+                channel_id = int(entity_id) if isinstance(entity_id, int) else int(entity_id)
+                peer = PeerChannel(channel_id)
+                return await self.client.get_entity(peer)
+                
+        except Exception as e:
+            self.logger.debug(f"Принудительное получение entity не удалось: {e}")
+            
+        return None
+    
+    async def _generate_detailed_error_report(self, entity_id: Union[str, int], entity_name: str, all_errors: List[str]):
+        """
+        НОВОЕ: Генерация детального отчета об ошибке с рекомендациями.
+        """
+        self.logger.error(f"❌ Детальный отчет об ошибке для {entity_name} ({entity_id}):")
+        
+        # Показываем все попытки
+        for i, error in enumerate(all_errors, 1):
+            self.logger.error(f"   {i}. {error}")
+        
+        # Анализируем тип ошибки и даем рекомендации
+        error_text = ' '.join(all_errors).lower()
+        
+        if 'cannot find any entity' in error_text:
+            self.logger.error("💡 Возможные причины:")
+            self.logger.error("   • Вы не подписаны на этот канал")
+            self.logger.error("   • Канал является приватным")
+            self.logger.error("   • Неверный ID канала")
+            self.logger.error("   • Канал был удален или заблокирован")
+            
+        if 'private' in error_text or 'invalid' in error_text:
+            self.logger.error("💡 Рекомендации:")
+            self.logger.error("   • Проверьте, что вы являетесь участником канала")
+            self.logger.error("   • Для приватных каналов используйте invite link")
+            self.logger.error("   • Убедитесь что ID канала указан правильно")
+        
+        # Показываем доступные каналы для справки
+        try:
+            dialogs = await self.client.get_dialogs(limit=10)
+            self.logger.error("📋 Ваши доступные каналы (первые 10):")
+            for dialog in dialogs:
+                if hasattr(dialog.entity, 'id'):
+                    title = getattr(dialog.entity, 'title', 'N/A')
+                    self.logger.error(f"   • {dialog.entity.id} - {title}")
+        except Exception:
+            pass
     
     def _init_database(self):
         """Инициализация SQLite базы данных."""
