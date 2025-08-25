@@ -134,7 +134,7 @@ class TelegramCopierV3:
     
     async def _get_entity_safe(self, entity_id: Union[str, int], entity_name: str, max_retries: int = 5):
         """
-        НОВОЕ: Безопасное получение entity с retry механизмом.
+        УЛУЧШЕНО: Безопасное получение entity с усиленным retry механизмом.
         
         Args:
             entity_id: ID или username entity
@@ -147,16 +147,21 @@ class TelegramCopierV3:
         Raises:
             Exception: Если entity не найдена после всех попыток
         """
-        from telethon.errors import FloodWaitError, PeerFloodError
+        from telethon.errors import FloodWaitError, PeerFloodError, ChannelPrivateError, ChatInvalidError
         import asyncio
         
         self.logger.info(f"🔍 Поиск {entity_name}: {entity_id}")
         
-        # Стратегии поиска
+        # НОВОЕ: Предварительная диагностика
+        await self._diagnose_entity_access(entity_id, entity_name)
+        
+        # Улучшенные стратегии поиска
         strategies = [
-            lambda: self.client.get_entity(entity_id),
-            lambda: self._get_entity_via_dialogs(entity_id),
-            lambda: self._get_entity_via_search(entity_id)
+            lambda: self._get_entity_direct(entity_id),
+            lambda: self._get_entity_via_full_dialogs(entity_id),
+            lambda: self._get_entity_via_search(entity_id),
+            lambda: self._get_entity_via_username_resolve(entity_id),
+            lambda: self._get_entity_via_peer_resolver(entity_id)
         ]
         
         last_exception = None
@@ -168,32 +173,135 @@ class TelegramCopierV3:
                 try:
                     entity = await strategy()
                     if entity:
-                        self.logger.info(f"✅ {entity_name} найден (стратегия {strategy_idx + 1})")
-                        return entity
+                        # НОВОЕ: Проверяем доступ к найденной entity
+                        if await self._validate_entity_access(entity, entity_name):
+                            self.logger.info(f"✅ {entity_name} найден и доступен (стратегия {strategy_idx + 1})")
+                            return entity
+                        else:
+                            self.logger.warning(f"⚠️ {entity_name} найден, но доступ ограничен")
+                            continue
                         
                 except (FloodWaitError, PeerFloodError) as e:
                     wait_time = getattr(e, 'seconds', 30)
                     self.logger.warning(f"FloodWait для {entity_name}: ожидание {wait_time}с")
                     await asyncio.sleep(wait_time)
                     
+                except (ChannelPrivateError, ChatInvalidError) as e:
+                    self.logger.error(f"❌ {entity_name} недоступен: {e}")
+                    raise Exception(f"{entity_name} недоступен - канал приватный или не существует")
+                    
                 except Exception as e:
                     last_exception = e
                     self.logger.debug(f"Стратегия {strategy_idx + 1} для {entity_name} не сработала: {e}")
                     continue
             
-            # Пауза между попытками
+            # Пауза между попытками с экспоненциальным backoff
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                sleep_time = min(2 ** attempt, 30)  # Максимум 30 секунд
+                self.logger.debug(f"Пауза {sleep_time}с перед следующей попыткой")
+                await asyncio.sleep(sleep_time)
         
         # Все попытки исчерпаны
         error_msg = f"Entity {entity_name} ({entity_id}) не найдена после {max_retries} попыток"
         if last_exception:
             error_msg += f". Последняя ошибка: {last_exception}"
         
+        # НОВОЕ: Добавляем детальную диагностику
+        self.logger.error(f"❌ {error_msg}")
+        await self._log_diagnostic_info(entity_id, entity_name)
+        
         raise Exception(error_msg)
     
+    async def _diagnose_entity_access(self, entity_id: Union[str, int], entity_name: str):
+        """НОВОЕ: Предварительная диагностика доступа к entity."""
+        try:
+            self.logger.debug(f"🔍 Диагностика доступа к {entity_name}")
+            
+            # Проверяем статус авторизации
+            if not await self.client.is_user_authorized():
+                self.logger.warning("⚠️ Клиент не авторизован")
+                return
+            
+            # Получаем информацию о текущем пользователе
+            me = await self.client.get_me()
+            self.logger.debug(f"📱 Авторизован как: {me.first_name} (ID: {me.id})")
+            
+            # Проверяем тип entity_id
+            if isinstance(entity_id, int):
+                self.logger.debug(f"🔢 Поиск по числовому ID: {entity_id}")
+            else:
+                self.logger.debug(f"📝 Поиск по строковому ID: {entity_id}")
+                
+        except Exception as e:
+            self.logger.debug(f"⚠️ Ошибка диагностики: {e}")
+    
+    async def _get_entity_direct(self, entity_id: Union[str, int]):
+        """Прямой поиск entity."""
+        try:
+            return await self.client.get_entity(entity_id)
+        except Exception:
+            return None
+    
+    async def _get_entity_via_full_dialogs(self, entity_id: Union[str, int]):
+        """Поиск entity через полную синхронизацию диалогов."""
+        try:
+            self.logger.debug("🔄 Синхронизация диалогов...")
+            
+            # Получаем ПОЛНЫЙ список диалогов без ограничений
+            dialogs = await self.client.get_dialogs()
+            self.logger.debug(f"📁 Найдено {len(dialogs)} диалогов")
+            
+            # Поиск в диалогах
+            for dialog in dialogs:
+                if self._match_entity(dialog.entity, entity_id):
+                    self.logger.debug(f"✅ Найден в диалогах: {getattr(dialog.entity, 'title', 'N/A')}")
+                    return dialog.entity
+                    
+            # Повторная попытка get_entity после полной синхронизации
+            return await self.client.get_entity(entity_id)
+            
+        except Exception as e:
+            self.logger.debug(f"❌ Ошибка синхронизации диалогов: {e}")
+            return None
+    
+    async def _get_entity_via_username_resolve(self, entity_id: Union[str, int]):
+        """Поиск entity через разрешение username."""
+        try:
+            if isinstance(entity_id, str):
+                # Убираем @ если есть
+                username = entity_id.lstrip('@')
+                
+                # Пробуем через resolve_username
+                result = await self.client(functions.contacts.ResolveUsernameRequest(username))
+                
+                if result.chats:
+                    return result.chats[0]
+                if result.users:
+                    return result.users[0]
+                    
+        except Exception as e:
+            self.logger.debug(f"❌ Ошибка resolve username: {e}")
+            return None
+    
+    async def _get_entity_via_peer_resolver(self, entity_id: Union[str, int]):
+        """Поиск entity через PeerChannel resolver."""
+        try:
+            if isinstance(entity_id, int):
+                # Пробуем создать PeerChannel и получить entity
+                from telethon.tl.types import PeerChannel
+                peer = PeerChannel(entity_id)
+                
+                # Получаем информацию о канале
+                result = await self.client(functions.channels.GetChannelsRequest([peer]))
+                if result.chats:
+                    return result.chats[0]
+                    
+        except Exception as e:
+            self.logger.debug(f"❌ Ошибка peer resolver: {e}")
+            return None
+
     async def _get_entity_via_dialogs(self, entity_id: Union[str, int]):
-        """Поиск entity через синхронизацию диалогов."""
+        """Поиск entity через синхронизацию диалогов (старый метод)."""
         try:
             # Принудительная синхронизация диалогов
             dialogs = await self.client.get_dialogs(limit=200)
