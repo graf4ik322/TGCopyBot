@@ -907,6 +907,8 @@ class TelegramCopier:
             
             # Собираем все медиа файлы из альбома
             media_files = []
+            all_downloaded = True  # Флаг для проверки, все ли файлы удалось скачать
+            
             for message in album_messages:
                 if message.media:
                     if is_from_discussion_group:
@@ -923,11 +925,26 @@ class TelegramCopier:
                             original_attributes = doc.attributes if hasattr(doc, 'attributes') else []
                             original_mime_type = getattr(doc, 'mime_type', None)
                             
+                            # ИСПРАВЛЕНИЕ: Проверяем тип файла перед скачиванием для альбома
+                            # Пропускаем HTML файлы и другие не-медиа типы
+                            if original_mime_type and (
+                                original_mime_type.startswith('text/html') or
+                                original_mime_type.startswith('application/html')
+                            ):
+                                self.logger.warning(f"Пропускаем HTML файл в альбоме - неподдерживаемый тип медиа")
+                                all_downloaded = False
+                                continue
+                            
                             # Пытаемся извлечь имя файла из атрибутов
                             from telethon.tl.types import DocumentAttributeFilename
                             for attr in original_attributes:
                                 if isinstance(attr, DocumentAttributeFilename):
                                     suggested_filename = attr.file_name
+                                    # Дополнительная проверка HTML в имени файла
+                                    if suggested_filename and suggested_filename.lower().endswith('.html'):
+                                        self.logger.warning(f"Пропускаем HTML файл {suggested_filename} в альбоме")
+                                        all_downloaded = False
+                                        continue
                                     break
                             
                             # Если имя файла не найдено, генерируем на основе MIME-типа
@@ -953,19 +970,49 @@ class TelegramCopier:
                             suggested_filename = f"photo_{message.id}.jpg"
                             original_mime_type = "image/jpeg"
                         
-                        # Скачиваем файл как bytes
-                        downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Создаем объект с атрибутами для правильного отображения
-                        if downloaded_file and suggested_filename:
-                            # Используем кортеж (data, filename) для передачи имени файла
-                            media_files.append((downloaded_file, suggested_filename))
-                        else:
-                            # Если не удалось определить имя файла, используем оригинальное медиа
-                            media_files.append(message.media)
+                        try:
+                            # Скачиваем файл как bytes
+                            downloaded_file = await self.client.download_media(message.media, file=bytes)
+                            
+                            # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Используем единообразный формат для всех файлов в альбоме
+                            if downloaded_file and suggested_filename:
+                                # Используем кортеж (data, filename) для передачи имени файла
+                                media_files.append((downloaded_file, suggested_filename))
+                            else:
+                                self.logger.warning(f"Не удалось скачать медиа {message.id} для альбома")
+                                all_downloaded = False
+                        except Exception as e:
+                            self.logger.warning(f"Ошибка скачивания медиа {message.id} для альбома: {e}")
+                            all_downloaded = False
                     else:
-                        # Для основных сообщений используем прямую ссылку
-                        media_files.append(message.media)
+                        # ИСПРАВЛЕНИЕ: Для основных сообщений тоже обеспечиваем единообразие
+                        # Если в альбоме есть комментарии, скачиваем все для единообразия
+                        if any(hasattr(msg, '_is_from_discussion_group') and msg._is_from_discussion_group for msg in album_messages):
+                            # Если в альбоме есть комментарии, скачиваем всё для единообразия
+                            try:
+                                downloaded_file = await self.client.download_media(message.media, file=bytes)
+                                suggested_filename = f"media_{message.id}"
+                                
+                                if isinstance(message.media, MessageMediaPhoto):
+                                    suggested_filename = f"photo_{message.id}.jpg"
+                                elif hasattr(message.media, 'document') and message.media.document:
+                                    # Пытаемся получить оригинальное имя файла
+                                    from telethon.tl.types import DocumentAttributeFilename
+                                    for attr in message.media.document.attributes:
+                                        if isinstance(attr, DocumentAttributeFilename):
+                                            suggested_filename = attr.file_name
+                                            break
+                                
+                                if downloaded_file:
+                                    media_files.append((downloaded_file, suggested_filename))
+                                else:
+                                    all_downloaded = False
+                            except Exception as e:
+                                self.logger.warning(f"Ошибка скачивания основного медиа {message.id} для альбома: {e}")
+                                all_downloaded = False
+                        else:
+                            # Если все файлы основные, используем прямые ссылки
+                            media_files.append(message.media)
             
             if not media_files:
                 self.logger.warning("Альбом не содержит медиа файлов")
@@ -1157,6 +1204,16 @@ class TelegramCopier:
                         if not suggested_filename:
                             suggested_filename = f"document_{message.id}"
                         
+                        # ИСПРАВЛЕНИЕ: Проверяем тип файла перед скачиванием
+                        # Пропускаем HTML файлы и другие не-медиа типы
+                        if original_mime_type and (
+                            original_mime_type.startswith('text/html') or
+                            original_mime_type.startswith('application/html') or
+                            suggested_filename.lower().endswith('.html')
+                        ):
+                            self.logger.warning(f"Пропускаем HTML файл {suggested_filename} - неподдерживаемый тип медиа")
+                            return False
+                        
                         downloaded_file = await self.client.download_media(message.media, file=bytes)
                         
                         file_kwargs = {
@@ -1194,6 +1251,15 @@ class TelegramCopier:
                             if hasattr(message.media, 'document') and message.media.document:
                                 doc = message.media.document
                                 mime_type = getattr(doc, 'mime_type', None)
+                                
+                                # ИСПРАВЛЕНИЕ: Проверяем тип файла перед скачиванием
+                                if mime_type and (
+                                    mime_type.startswith('text/html') or
+                                    mime_type.startswith('application/html')
+                                ):
+                                    self.logger.warning(f"Пропускаем HTML файл - неподдерживаемый тип медиа")
+                                    return False
+                                
                                 if mime_type:
                                     if mime_type.startswith('image/'):
                                         extension = mime_type.split('/')[-1]

@@ -2,6 +2,23 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.3] - 2025-08-26
+
+### Fixed
+- **Media Type Validation**: Fixed errors when copying HTML and unsupported media types
+  - **Root Cause**: Script attempted to process HTML files and other non-media content as media
+  - **Solution**: Added media type validation to skip HTML files before download attempts
+  - **Impact**: Prevents "Failed to convert *.html to media" errors
+  
+- **Album TLObject Consistency**: Fixed "TLObject was expected but found something else" error in albums
+  - **Root Cause**: Mixed usage of media objects and (data, filename) tuples in album copying
+  - **Solution**: Ensured consistent data format for all files within albums
+  - **Impact**: Albums with comments now copy successfully without TLObject errors
+  
+- **Enhanced Error Handling**: Improved error handling for unsupported file types and download failures
+  - Added graceful degradation when some album files cannot be processed
+  - Better logging for debugging media processing issues
+
 ## [1.0.2] - 2025-08-26
 
 ### Fixed
