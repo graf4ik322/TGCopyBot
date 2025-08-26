@@ -513,7 +513,7 @@ class TelegramCopier:
                 
                 # Проверка дедупликации
                 if self.deduplicator.is_message_processed(message):
-                    self.logger.debug(f"Сообщение {message.id} уже было обработано ранее, пропускаем")
+                    self.logger.info(f"⏭️ Пропускаем сообщение {message.id} (уже обработано ранее)")
                     self.skipped_messages += 1
                     continue
                 
@@ -627,15 +627,22 @@ class TelegramCopier:
                     grouped_messages[message.grouped_id].append(message)
                     self.logger.debug(f"Добавлено сообщение {message.id} в альбом {message.grouped_id}")
             
+            # ИСПРАВЛЕНО: Подсчитываем правильное количество обрабатываемых единиц
+            # Каждый альбом считается как одна единица обработки, а не как отдельные сообщения
+            single_messages_count = len([msg for msg in all_messages if not (hasattr(msg, 'grouped_id') and msg.grouped_id)])
+            processing_units_count = single_messages_count + len(grouped_messages)
+            
             self.logger.info(f"📊 Статистика сообщений:")
             self.logger.info(f"   📌 Основных постов: {main_posts_count}")
             self.logger.info(f"   💬 Комментариев: {comments_count}")
             self.logger.info(f"   🎬 Альбомов в основных постах: {albums_in_main_count}")
             self.logger.info(f"   🎬 Альбомов в комментариях: {albums_in_comments_count}")
             self.logger.info(f"   📦 Всего альбомов: {len(grouped_messages)}")
+            self.logger.info(f"   🔢 Одиночных сообщений: {single_messages_count}")
+            self.logger.info(f"   ⚙️ Единиц обработки: {processing_units_count}")
             
-            # Инициализируем трекер прогресса
-            progress_tracker = ProgressTracker(total_messages)
+            # Инициализируем трекер прогресса с правильным количеством единиц обработки
+            progress_tracker = ProgressTracker(processing_units_count)
             
             # ЭТАП 3: Обрабатываем сообщения в ИСХОДНОМ ПОРЯДКЕ
             for message in all_messages:
@@ -673,9 +680,9 @@ class TelegramCopier:
                         # В режиме flatten_structure комментарии обрабатываются как обычные посты
                         success = await self.copy_album(album_messages)
                         
-                        # Обновляем статистику для всех сообщений альбома
+                        # ИСПРАВЛЕНО: Обновляем прогресс только один раз для альбома, но записываем все сообщения в мониторинг
+                        progress_tracker.update(success)
                         for msg in album_messages:
-                            progress_tracker.update(success)
                             self.performance_monitor.record_message_processed(success, total_size // len(album_messages))
                         
                         if success:
@@ -838,8 +845,9 @@ class TelegramCopier:
             except Exception as e:
                 self.logger.warning(f"Не удалось проверить целевой канал: {e}")
         
-        self.logger.info(f"📊 Копирование завершено. Скопировано: {self.copied_messages}, "
-                        f"Ошибок: {self.failed_messages}, Пропущено: {self.skipped_messages}")
+        self.logger.info("═" * 62)
+        self.logger.info(f"📊 Копирование завершено: ✅ {self.copied_messages} | ❌ {self.failed_messages} | ⏭️ {self.skipped_messages}")
+        self.logger.info("═" * 62)
         
         return final_stats
     
@@ -1036,6 +1044,7 @@ class TelegramCopier:
         try:
             # Пропускаем служебные сообщения
             if not message.message and not message.media:
+                self.logger.info(f"⏭️ Пропускаем служебное сообщение {message.id} (нет контента)")
                 self.skipped_messages += 1
                 return True
             

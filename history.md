@@ -2,6 +2,45 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.7] - 2025-08-26
+
+### Critical Fixes
+- **Progress Calculation Issue**: Fixed progress showing >100% and negative time estimates
+  - **Root Cause**: Progress tracker counted each message in albums individually, but total count was based on processing units
+  - **Solution**: Redesigned progress calculation to count albums as single processing units
+  - **Impact**: Progress now accurately shows completion percentage and realistic time estimates
+  - **Technical Details**:
+    - Fixed album progress updates to call `progress_tracker.update()` once per album, not per message
+    - Recalculated `total_messages` to count single messages + albums as separate units
+    - Added protection against progress > 100% and negative time calculations
+    - Improved time formatting (seconds/minutes/hours) for better readability
+
+- **Skipped Messages Logging**: Enhanced visibility into why messages are skipped
+  - **Root Cause**: Skipped messages (125 in user's case) were logged at DEBUG level, not visible to users
+  - **Solution**: Elevated skipped message logging to INFO level with clear reasons
+  - **Impact**: Users now see why messages are skipped (duplicates, service messages, etc.)
+  - **Details**: Added emoji indicators and clear explanations for each skip reason
+
+### Console UX/UI Improvements
+- **Beautiful Progress Display**: Redesigned all console output with professional formatting
+  - **Progress Messages**: Added emoji indicators (📊, ❌, ⏱️) and better formatting
+  - **Startup Banner**: Created professional boxed layout for authorization success
+  - **Final Statistics**: Redesigned with beautiful ASCII box formatting and comprehensive metrics
+  - **Status Messages**: Enhanced resume/start messages with clear visual hierarchy
+  - **Time Formatting**: Improved time display (seconds/minutes/hours) throughout application
+
+- **Enhanced User Experience**: Multiple improvements for better usability
+  - **Success Rate Calculation**: Added percentage success rate to final statistics
+  - **Processing Unit Clarity**: Clarified difference between total messages and processing units
+  - **Dry Run Indicators**: Made simulation mode more visible with dedicated banners
+  - **Completion Messages**: Added celebration formatting for successful completion
+
+### Performance & Logic Fixes
+- **Statistics Calculation**: Fixed potential logical inconsistencies in final statistics
+  - **Protection**: Added safeguards against processed_messages > total_messages
+  - **Accuracy**: Improved success rate calculation with proper error handling
+  - **Consistency**: Ensured all statistics calculations use the same logic
+
 ## [1.0.6] - 2025-08-26
 
 ### Fixed

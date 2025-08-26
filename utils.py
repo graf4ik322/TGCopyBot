@@ -271,37 +271,61 @@ class ProgressTracker:
             self._log_progress()
     
     def _log_progress(self) -> None:
-        """Логирование текущего прогресса."""
+        """
+        Логирование текущего прогресса.
+        ИСПРАВЛЕНО: Улучшена логика расчета времени и процентов.
+        """
         elapsed_time = time.time() - self.start_time
-        progress_percent = (self.processed_messages / self.total_messages) * 100
+        progress_percent = (self.processed_messages / self.total_messages) * 100 if self.total_messages > 0 else 0
         
-        if self.processed_messages > 0:
+        # Ограничиваем прогресс до 100%
+        progress_percent = min(progress_percent, 100.0)
+        
+        if self.processed_messages > 0 and elapsed_time > 0:
             avg_time_per_message = elapsed_time / self.processed_messages
-            remaining_messages = self.total_messages - self.processed_messages
+            remaining_messages = max(0, self.total_messages - self.processed_messages)
             estimated_remaining_time = avg_time_per_message * remaining_messages
             
+            # Форматируем время более читабельно
+            if estimated_remaining_time < 60:
+                time_str = f"{estimated_remaining_time:.0f} сек"
+            else:
+                time_str = f"{estimated_remaining_time/60:.1f} мин"
+            
             self.logger.info(
-                f"Прогресс: {self.processed_messages}/{self.total_messages} "
+                f"📊 Прогресс: {self.processed_messages}/{self.total_messages} "
                 f"({progress_percent:.1f}%), "
-                f"Ошибок: {self.failed_messages}, "
-                f"Оставшееся время: {estimated_remaining_time/60:.1f} мин"
+                f"❌ Ошибок: {self.failed_messages}, "
+                f"⏱️ Осталось: {time_str}"
+            )
+        else:
+            self.logger.info(
+                f"📊 Прогресс: {self.processed_messages}/{self.total_messages} "
+                f"({progress_percent:.1f}%), "
+                f"❌ Ошибок: {self.failed_messages}"
             )
     
     def get_final_stats(self) -> dict:
         """
         Получение финальной статистики.
+        ИСПРАВЛЕНО: Улучшена логика расчета статистики с защитой от переполнения.
         
         Returns:
             Словарь со статистикой
         """
         elapsed_time = time.time() - self.start_time
+        
+        # Защита от логических несоответствий
+        processed_count = min(self.processed_messages, self.total_messages)
+        success_count = max(0, processed_count - self.failed_messages)
+        
         return {
             'total_messages': self.total_messages,
-            'processed_messages': self.processed_messages,
+            'processed_messages': processed_count,
             'failed_messages': self.failed_messages,
-            'success_rate': ((self.processed_messages - self.failed_messages) / self.processed_messages * 100) if self.processed_messages > 0 else 0,
+            'success_rate': (success_count / processed_count * 100) if processed_count > 0 else 0,
             'elapsed_time': elapsed_time,
-            'messages_per_minute': (self.processed_messages / elapsed_time * 60) if elapsed_time > 0 else 0
+            'messages_per_minute': (processed_count / elapsed_time * 60) if elapsed_time > 0 else 0
         }
 
 
