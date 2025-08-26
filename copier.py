@@ -915,37 +915,13 @@ class TelegramCopier:
             
             for message in album_messages:
                 if message.media:
-                    # Проверяем HTML файлы и пропускаем их
-                    skip_file = False
-                    if hasattr(message.media, 'document') and message.media.document:
-                        doc = message.media.document
-                        original_mime_type = getattr(doc, 'mime_type', None)
-                        
-                        if original_mime_type and (
-                            original_mime_type.startswith('text/html') or
-                            original_mime_type.startswith('application/html')
-                        ):
-                            self.logger.warning(f"Пропускаем HTML файл {message.id} в альбоме")
-                            skip_file = True
-                        
-                        # Проверяем имя файла на HTML
-                        if not skip_file:
-                            from telethon.tl.types import DocumentAttributeFilename
-                            for attr in doc.attributes if hasattr(doc, 'attributes') else []:
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    if attr.file_name.lower().endswith('.html'):
-                                        self.logger.warning(f"Пропускаем HTML файл {attr.file_name} в альбоме")
-                                        skip_file = True
-                                    break
-                    
-                    # Если файл не HTML - используем как есть (как для обычных постов)
-                    if not skip_file:
-                        media_files.append(message.media)
-                        self.logger.debug(f"Добавлен медиа объект {message.id}")
+                    # Добавляем ВСЕ медиа файлы включая HTML
+                    media_files.append(message.media)
+                    self.logger.debug(f"Добавлен медиа объект {message.id}")
             
             # Проверяем результат
             if not media_files:
-                self.logger.warning("Альбом не содержит медиа файлов после фильтрации")
+                self.logger.warning("Альбом не содержит медиа файлов")
                 # Если нет медиа, отправляем как обычное текстовое сообщение
                 if first_message.message:
                     self.logger.info("Отправляем только текст альбома, так как медиа недоступно")
@@ -1077,29 +1053,7 @@ class TelegramCopier:
                     sent_message = await self.client.send_file(**file_kwargs)
                     
                 elif isinstance(message.media, MessageMediaDocument):
-                    # Для документов/видео/аудио - проверяем HTML файлы
-                    if hasattr(message.media, 'document') and message.media.document:
-                        doc = message.media.document
-                        original_mime_type = getattr(doc, 'mime_type', None)
-                        
-                        # Проверяем на HTML файлы и пропускаем их
-                        if original_mime_type and (
-                            original_mime_type.startswith('text/html') or
-                            original_mime_type.startswith('application/html')
-                        ):
-                            self.logger.warning(f"Пропускаем HTML файл - неподдерживаемый тип медиа")
-                            return False
-                        
-                        # Проверяем имя файла на HTML
-                        from telethon.tl.types import DocumentAttributeFilename
-                        for attr in doc.attributes if hasattr(doc, 'attributes') else []:
-                            if isinstance(attr, DocumentAttributeFilename):
-                                if attr.file_name.lower().endswith('.html'):
-                                    self.logger.warning(f"Пропускаем HTML файл {attr.file_name} - неподдерживаемый тип медиа")
-                                    return False
-                                break
-                    
-                    # Стандартная обработка для всех документов
+                    # Для документов/видео/аудио - обрабатываем ВСЕ файлы включая HTML
                     file_kwargs = {
                         'entity': self.target_entity,
                         'file': message.media,
