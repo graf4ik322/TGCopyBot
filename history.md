@@ -2,6 +2,24 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.4] - 2025-08-26
+
+### Fixed
+- **Album Comment Detection**: Fixed album type detection for comments from discussion groups
+  - **Root Cause**: Only first message in album was checked for discussion group origin
+  - **Solution**: Check all messages in album to determine if any are from discussion groups  
+  - **Impact**: Proper detection ensures consistent processing for all album files
+
+- **Individual Message Processing**: Fixed per-message comment detection in albums
+  - **Root Cause**: Used global album flag instead of checking each message individually
+  - **Solution**: Check each message's `_is_from_discussion_group` flag separately
+  - **Impact**: Each file in album is processed according to its actual origin
+
+- **Enhanced Album Debugging**: Added detailed logging for album processing
+  - Shows file types and processing method for each media file
+  - Better error tracking for partial album failures
+  - Clearer indication when files are skipped vs downloaded
+
 ## [1.0.3] - 2025-08-26
 
 ### Fixed

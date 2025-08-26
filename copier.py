@@ -903,7 +903,11 @@ class TelegramCopier:
                 return True
             
             # Проверяем, нужно ли скачивать медиа (для комментариев из protected chats)
-            is_from_discussion_group = hasattr(first_message, '_is_from_discussion_group') and first_message._is_from_discussion_group
+            # ИСПРАВЛЕНИЕ: Проверяем все сообщения альбома, а не только первое
+            is_from_discussion_group = any(
+                hasattr(msg, '_is_from_discussion_group') and msg._is_from_discussion_group 
+                for msg in album_messages
+            )
             
             # Собираем все медиа файлы из альбома
             media_files = []
@@ -911,7 +915,10 @@ class TelegramCopier:
             
             for message in album_messages:
                 if message.media:
-                    if is_from_discussion_group:
+                    # ИСПРАВЛЕНИЕ: Проверяем каждое сообщение индивидуально
+                    message_is_from_discussion = hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group
+                    
+                    if message_is_from_discussion:
                         # ИСПРАВЛЕНИЕ: Для комментариев скачиваем медиа с сохранением атрибутов
                         self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома с сохранением атрибутов")
                         
@@ -985,11 +992,12 @@ class TelegramCopier:
                             self.logger.warning(f"Ошибка скачивания медиа {message.id} для альбома: {e}")
                             all_downloaded = False
                     else:
-                        # ИСПРАВЛЕНИЕ: Для основных сообщений тоже обеспечиваем единообразие
-                        # Если в альбоме есть комментарии, скачиваем все для единообразия
-                        if any(hasattr(msg, '_is_from_discussion_group') and msg._is_from_discussion_group for msg in album_messages):
-                            # Если в альбоме есть комментарии, скачиваем всё для единообразия
+                        # ИСПРАВЛЕНИЕ: Если в альбоме есть хотя бы один файл из комментариев,
+                        # скачиваем ВСЕ файлы для обеспечения единообразия
+                        if is_from_discussion_group:
+                            # Скачиваем основные файлы тоже для единообразия с комментариями
                             try:
+                                self.logger.debug(f"Скачиваем основное медиа {message.id} для единообразия с комментариями в альбоме")
                                 downloaded_file = await self.client.download_media(message.media, file=bytes)
                                 suggested_filename = f"media_{message.id}"
                                 
@@ -1006,20 +1014,29 @@ class TelegramCopier:
                                 if downloaded_file:
                                     media_files.append((downloaded_file, suggested_filename))
                                 else:
+                                    self.logger.warning(f"Не удалось скачать основное медиа {message.id} для альбома")
                                     all_downloaded = False
                             except Exception as e:
                                 self.logger.warning(f"Ошибка скачивания основного медиа {message.id} для альбома: {e}")
                                 all_downloaded = False
                         else:
-                            # Если все файлы основные, используем прямые ссылки
+                            # Если все файлы основные (нет комментариев), используем прямые ссылки
                             media_files.append(message.media)
             
+            # ИСПРАВЛЕНИЕ: Проверяем результат сбора медиа файлов
             if not media_files:
-                self.logger.warning("Альбом не содержит медиа файлов")
+                self.logger.warning("Альбом не содержит медиа файлов (все файлы отфильтрованы или не удалось скачать)")
                 # Если нет медиа, отправляем как обычное текстовое сообщение
                 if first_message.message:
+                    self.logger.info("Отправляем только текст альбома, так как медиа недоступно")
                     return await self.copy_single_message(first_message)
+                else:
+                    self.logger.warning("Альбом не содержит ни медиа, ни текста - пропускаем")
                 return False
+            
+            # Дополнительная проверка на частичные ошибки
+            if not all_downloaded:
+                self.logger.warning(f"Альбом содержит {len(media_files)} файлов, но некоторые файлы не удалось обработать")
             
             # Получаем текст из первого сообщения альбома
             caption = first_message.message or ""
@@ -1035,7 +1052,13 @@ class TelegramCopier:
             if first_message.entities:
                 send_kwargs['formatting_entities'] = first_message.entities
             
-            self.logger.debug(f"Отправляем альбом из {len(media_files)} медиа файлов")
+            # ОТЛАДКА: Выводим информацию о типах файлов в альбоме
+            self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов")
+            for i, media in enumerate(media_files):
+                if isinstance(media, tuple):
+                    self.logger.debug(f"  Файл {i+1}: скачанные данные, имя: {media[1]}")
+                else:
+                    self.logger.debug(f"  Файл {i+1}: медиа объект типа {type(media)}")
             
             # Отправляем альбом как группированные медиа
             sent_messages = await self.client.send_file(**send_kwargs)
