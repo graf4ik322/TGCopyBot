@@ -2,6 +2,18 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.2] - 2025-08-26
+
+### Fixed
+- **Comment Chronology Fix**: Fixed comment ordering to follow Post → Comments → Post structure
+  - **Root Cause**: Comments were collected separately and then sorted globally, breaking the logical flow
+  - **Solution**: Restructured comment collection to append comments immediately after their parent post
+  - **Impact**: Comments now appear in correct chronological order: Post → its comments → Next post → its comments
+  - **Technical Details**: 
+    - Modified comment collection logic in `copy_all_messages()` method
+    - Comments are now sorted by creation time within each post
+    - Maintains proper parent-child relationship structure
+
 ## [1.0.1] - 2025-08-26
 
 ### Fixed

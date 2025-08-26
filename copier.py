@@ -528,9 +528,9 @@ class TelegramCopier:
             # Инициализируем переменную comments_collected для использования в последующих блоках
             comments_collected = 0
             
-            # ЭТАП 1.5: Собираем комментарии для каждого сообщения (если включен режим антивложенности)
+            # ЭТАП 1.5: Собираем комментарии и формируем правильную структуру (если включен режим антивложенности)
             if self.flatten_structure:
-                self.logger.info("🔄 Сбор комментариев из discussion groups...")
+                self.logger.info("🔄 Сбор комментариев из discussion groups с правильной хронологией...")
                 messages_with_comments = 0
                 
                 # Определяем уникальные discussion groups
@@ -550,26 +550,40 @@ class TelegramCopier:
                         comments_by_post = await self.get_all_comments_from_discussion_group(discussion_group_id)
                         all_comments_by_post.update(comments_by_post)
                     
-                    # Добавляем комментарии к соответствующим сообщениям
-                    for message in all_messages[:]:
+                    # НОВОЕ: Создаем правильную структуру Пост → Комментарии → Пост → Комментарии
+                    self.logger.info("🔄 Формируем структуру: Пост → Комментарии → Пост...")
+                    messages_with_comments_structured = []
+                    
+                    for message in all_messages:
+                        # Добавляем основной пост
+                        messages_with_comments_structured.append(message)
+                        
+                        # Проверяем, есть ли комментарии к этому посту
                         if message.id in all_comments_by_post:
                             comments = all_comments_by_post[message.id]
                             messages_with_comments += 1
+                            
+                            # Сортируем комментарии по времени создания
+                            comments.sort(key=lambda comment: comment.date if hasattr(comment, 'date') and comment.date else comment.id)
                             
                             # Помечаем комментарии специальным атрибутом для последующей идентификации
                             for comment in comments:
                                 comment._is_from_discussion_group = True
                                 comment._parent_message_id = message.id
                             
-                            # Добавляем комментарии к общему списку сообщений
-                            all_messages.extend(comments)
+                            # Добавляем комментарии сразу после основного поста
+                            messages_with_comments_structured.extend(comments)
                             comments_collected += len(comments)
                             
-                            self.logger.info(f"💬 Сообщение {message.id}: добавлено {len(comments)} комментариев")
+                            self.logger.info(f"💬 Пост {message.id}: добавлено {len(comments)} комментариев в правильном порядке")
+                    
+                    # Заменяем исходный список на правильно структурированный
+                    all_messages = messages_with_comments_structured
                     
                     self.logger.info(f"📊 Результаты сбора комментариев:")
                     self.logger.info(f"   📝 Сообщений с комментариями: {messages_with_comments}")
                     self.logger.info(f"   💬 Всего собрано комментариев: {comments_collected}")
+                    self.logger.info(f"   ✅ Структура: Пост → Комментарии → Пост сформирована")
                     
                     if comments_collected > 0:
                         self.logger.info(f"✅ Успешно собрано {comments_collected} комментариев из discussion groups")
@@ -577,15 +591,6 @@ class TelegramCopier:
                         self.logger.info("ℹ️  Комментарии не найдены в discussion groups")
                 else:
                     self.logger.info("ℹ️  Discussion groups не найдены или канал не имеет комментариев")
-            
-            # ЭТАП 1.6: Сортируем все сообщения (основные + комментарии) по хронологии
-            if comments_collected > 0:
-                self.logger.info("🔄 Сортировка сообщений и комментариев по хронологии...")
-                
-                # Сортируем все сообщения по дате создания для сохранения хронологии
-                all_messages.sort(key=lambda msg: msg.date if hasattr(msg, 'date') and msg.date else msg.id)
-                
-                self.logger.info(f"✅ Сообщения отсортированы по хронологии")
             
             self.logger.info(f"Всего сообщений (включая комментарии): {len(all_messages)}, начинаем группировку")
             
