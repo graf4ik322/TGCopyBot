@@ -258,13 +258,19 @@ class ProgressTracker:
     def update(self, success: bool = True) -> None:
         """
         Обновление прогресса.
+        ИСПРАВЛЕНО: Добавлена защита от переполнения прогресса.
         
         Args:
             success: Успешно ли обработано сообщение
         """
-        self.processed_messages += 1
-        if not success:
-            self.failed_messages += 1
+        # КРИТИЧЕСКАЯ ЗАЩИТА: Не позволяем превысить общее количество
+        if self.processed_messages < self.total_messages:
+            self.processed_messages += 1
+            if not success:
+                self.failed_messages += 1
+        else:
+            # Логируем предупреждение если пытаемся превысить лимит
+            self.logger.warning(f"Попытка увеличить прогресс сверх лимита: {self.processed_messages}/{self.total_messages}")
         
         # Логируем прогресс каждые 10 сообщений
         if self.processed_messages % 10 == 0:

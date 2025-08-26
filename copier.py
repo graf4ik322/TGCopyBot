@@ -442,14 +442,14 @@ class TelegramCopier:
                 str(self.target_group_id)
             )
         
-        # Получаем общее количество сообщений
-        total_messages = await self.get_total_messages_count()
-        if total_messages == 0:
+        # ИСПРАВЛЕНО: Сначала получаем сообщения, потом инициализируем прогресс
+        # Уберем раннюю инициализацию ProgressTracker - будем делать это после подсчета реальных сообщений
+        total_messages_in_channel = await self.get_total_messages_count()
+        if total_messages_in_channel == 0:
             self.logger.warning("В исходной группе/канале нет сообщений")
             return {'total_messages': 0, 'copied_messages': 0}
         
-        self.logger.info(f"Начинаем копирование {total_messages} сообщений")
-        progress_tracker = ProgressTracker(total_messages)
+        self.logger.info(f"Всего сообщений в канале: {total_messages_in_channel}")
         
         # НОВОЕ: Логируем режим обработки комментариев
         if self.flatten_structure:
@@ -641,8 +641,10 @@ class TelegramCopier:
             self.logger.info(f"   🔢 Одиночных сообщений: {single_messages_count}")
             self.logger.info(f"   ⚙️ Единиц обработки: {processing_units_count}")
             
-            # Инициализируем трекер прогресса с правильным количеством единиц обработки
-            progress_tracker = ProgressTracker(processing_units_count)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Инициализируем прогресс с правильным количеством
+            # Используем количество собранных сообщений, а не общий счет из канала
+            progress_tracker = ProgressTracker(len(all_messages))
+            self.logger.info(f"🔄 Инициализирован прогресс для {len(all_messages)} сообщений (включая сообщения в альбомах)")
             
             # ЭТАП 3: Обрабатываем сообщения в ИСХОДНОМ ПОРЯДКЕ
             for message in all_messages:
@@ -680,9 +682,9 @@ class TelegramCopier:
                         # В режиме flatten_structure комментарии обрабатываются как обычные посты
                         success = await self.copy_album(album_messages)
                         
-                        # ИСПРАВЛЕНО: Обновляем прогресс только один раз для альбома, но записываем все сообщения в мониторинг
-                        progress_tracker.update(success)
+                        # ИСПРАВЛЕНО: Обновляем прогресс для каждого сообщения в альбоме (как и задумано)
                         for msg in album_messages:
+                            progress_tracker.update(success)
                             self.performance_monitor.record_message_processed(success, total_size // len(album_messages))
                         
                         if success:
@@ -835,6 +837,9 @@ class TelegramCopier:
             'failed_messages': self.failed_messages,
             'skipped_messages': self.skipped_messages
         })
+        
+        # ОТЛАДКА: Логируем ключевые показатели для диагностики
+        self.logger.debug(f"СТАТИСТИКА ПРОГРЕССА: Обработано={final_stats['processed_messages']}, Всего={final_stats['total_messages']}, Прогресс={final_stats['processed_messages']/final_stats['total_messages']*100:.1f}%")
         
         # НОВОЕ: Проверяем реальное количество сообщений в целевом канале
         if self.copied_messages > 0 and not self.dry_run:

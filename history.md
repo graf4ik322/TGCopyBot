@@ -2,6 +2,31 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.8] - 2025-08-26
+
+### Critical Bug Fix
+- **Progress Calculation 125% Issue**: COMPLETELY FIXED the progress showing 10/8 (125%) bug
+  - **Root Cause**: ProgressTracker was initialized with wrong total count - used channel total instead of actual collected messages
+  - **Solution**: Initialize ProgressTracker with `len(all_messages)` (actual messages to process) instead of channel total count
+  - **Impact**: Progress now shows accurate percentages like 8/8 (100%) instead of 10/8 (125%)
+  - **Critical Technical Fix**:
+    - Removed dual ProgressTracker initialization that caused confusion
+    - Use actual collected message count, not theoretical channel total
+    - Added overflow protection: processed_messages can never exceed total_messages
+    - Added warning logs when attempting to exceed progress limits
+    - Enhanced debugging with progress statistics logging
+
+- **Negative Time Estimates**: Fixed time calculation edge cases
+  - **Solution**: Added protection against negative remaining time calculations
+  - **Impact**: Time estimates are always positive and realistic
+
+### Technical Improvements
+- **Progress Overflow Protection**: Added critical safeguards in ProgressTracker.update()
+  - Prevents processed_messages from exceeding total_messages
+  - Logs warnings when overflow attempts occur
+  - Maintains progress integrity throughout processing
+- **Enhanced Debugging**: Added detailed progress statistics logging for troubleshooting
+
 ## [1.0.7] - 2025-08-26
 
 ### Critical Fixes
