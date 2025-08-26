@@ -999,8 +999,46 @@ class TelegramCopier:
                 else:
                     self.logger.info(f"  Файл {i+1}: медиа объект {type(media)}")
             
-            # Отправляем альбом
-            sent_messages = await self.client.send_file(**send_kwargs)
+            # ПРОСТОЕ РЕШЕНИЕ: Отправляем каждое сообщение альбома отдельно
+            self.logger.info("Отправляем альбом как отдельные сообщения (избегаем TLObject ошибки)")
+            sent_messages = []
+            
+            for i, (message, media) in enumerate(zip(album_messages, media_files)):
+                try:
+                    if isinstance(media, tuple):
+                        file_data, filename = media
+                        # Отправляем как отдельный файл
+                        individual_kwargs = {
+                            'entity': self.target_entity,
+                            'file': (file_data, filename),
+                            'caption': caption if i == 0 else "",  # Текст только к первому файлу
+                        }
+                        
+                        if i == 0 and first_message.entities:
+                            individual_kwargs['formatting_entities'] = first_message.entities
+                            
+                        sent_msg = await self.client.send_file(**individual_kwargs)
+                        sent_messages.append(sent_msg)
+                        self.logger.debug(f"✓ Отправлен файл {i+1}/{len(media_files)}: {filename}")
+                        
+                    else:
+                        # Прямой медиа объект
+                        individual_kwargs = {
+                            'entity': self.target_entity,
+                            'file': media,
+                            'caption': caption if i == 0 else "",
+                        }
+                        
+                        if i == 0 and first_message.entities:
+                            individual_kwargs['formatting_entities'] = first_message.entities
+                            
+                        sent_msg = await self.client.send_file(**individual_kwargs)
+                        sent_messages.append(sent_msg)
+                        self.logger.debug(f"✓ Отправлен медиа объект {i+1}/{len(media_files)}")
+                        
+                except Exception as individual_error:
+                    self.logger.warning(f"Ошибка отправки файла {i+1}: {individual_error}")
+                    # Продолжаем с остальными файлами
             
             # Анализируем результат
             if isinstance(sent_messages, list):
