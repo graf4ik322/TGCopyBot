@@ -909,66 +909,43 @@ class TelegramCopier:
             
             self.logger.info(f"Альбом содержит сообщения из discussion group: {has_discussion_messages}")
             
-            # НОВАЯ СТРАТЕГИЯ: Всегда скачиваем ВСЕ файлы для консистентности
-            # Это исключит любые проблемы с смешиванием типов данных
+            # ВОЗВРАТ К ПРОСТОЙ ЛОГИКЕ: Комментарии = обычные посты
+            # Используем стандартную обработку медиа без специальных случаев
             media_files = []
-            skipped_files = 0
             
             for message in album_messages:
                 if message.media:
-                    # Определяем имя файла
-                    suggested_filename = f"media_{message.id}"
-                    
-                    # Проверяем тип медиа и определяем имя файла
+                    # Проверяем HTML файлы и пропускаем их
                     skip_file = False
-                    
-                    if isinstance(message.media, MessageMediaPhoto):
-                        suggested_filename = f"photo_{message.id}.jpg"
-                    elif hasattr(message.media, 'document') and message.media.document:
+                    if hasattr(message.media, 'document') and message.media.document:
                         doc = message.media.document
                         original_mime_type = getattr(doc, 'mime_type', None)
                         
-                        # КРИТИЧЕСКАЯ ПРОВЕРКА: Пропускаем HTML файлы
                         if original_mime_type and (
                             original_mime_type.startswith('text/html') or
                             original_mime_type.startswith('application/html')
                         ):
                             self.logger.warning(f"Пропускаем HTML файл {message.id} в альбоме")
-                            skipped_files += 1
                             skip_file = True
                         
-                        # Пытаемся получить оригинальное имя файла
+                        # Проверяем имя файла на HTML
                         if not skip_file:
                             from telethon.tl.types import DocumentAttributeFilename
                             for attr in doc.attributes if hasattr(doc, 'attributes') else []:
                                 if isinstance(attr, DocumentAttributeFilename):
-                                    suggested_filename = attr.file_name
-                                    # Проверяем HTML в имени файла
-                                    if suggested_filename.lower().endswith('.html'):
-                                        self.logger.warning(f"Пропускаем HTML файл {suggested_filename} в альбоме")
-                                        skipped_files += 1
+                                    if attr.file_name.lower().endswith('.html'):
+                                        self.logger.warning(f"Пропускаем HTML файл {attr.file_name} в альбоме")
                                         skip_file = True
                                     break
                     
-                    # Скачиваем файл (единообразно для всех)
+                    # Если файл не HTML - используем как есть (как для обычных постов)
                     if not skip_file:
-                        try:
-                            self.logger.debug(f"Скачиваем медиа {message.id} ({suggested_filename})")
-                            downloaded_file = await self.client.download_media(message.media, file=bytes)
-                            
-                            if downloaded_file:
-                                media_files.append((downloaded_file, suggested_filename))
-                                self.logger.debug(f"✓ Скачан: {suggested_filename}, размер: {len(downloaded_file)} bytes")
-                            else:
-                                self.logger.warning(f"Не удалось скачать медиа {message.id}")
-                                skipped_files += 1
-                        except Exception as e:
-                            self.logger.warning(f"Ошибка скачивания медиа {message.id}: {e}")
-                            skipped_files += 1
+                        media_files.append(message.media)
+                        self.logger.debug(f"Добавлен медиа объект {message.id}")
             
             # Проверяем результат
             if not media_files:
-                self.logger.warning(f"Альбом не содержит медиа файлов (пропущено: {skipped_files})")
+                self.logger.warning("Альбом не содержит медиа файлов после фильтрации")
                 # Если нет медиа, отправляем как обычное текстовое сообщение
                 if first_message.message:
                     self.logger.info("Отправляем только текст альбома, так как медиа недоступно")
@@ -983,7 +960,7 @@ class TelegramCopier:
             # Подготавливаем параметры для отправки альбома
             send_kwargs = {
                 'entity': self.target_entity,
-                'file': media_files,
+                'file': media_files,  # Теперь все медиа объекты одного типа
                 'caption': caption,
             }
             
@@ -992,53 +969,12 @@ class TelegramCopier:
                 send_kwargs['formatting_entities'] = first_message.entities
             
             # ОТЛАДКА: Информация о файлах в альбоме
-            self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов (пропущено: {skipped_files})")
+            self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов")
             for i, media in enumerate(media_files):
-                if isinstance(media, tuple):
-                    self.logger.info(f"  Файл {i+1}: {media[1]}, размер: {len(media[0])} bytes")
-                else:
-                    self.logger.info(f"  Файл {i+1}: медиа объект {type(media)}")
+                self.logger.debug(f"  Файл {i+1}: медиа объект {type(media)}")
             
-            # ПРОСТОЕ РЕШЕНИЕ: Отправляем каждое сообщение альбома отдельно
-            self.logger.info("Отправляем альбом как отдельные сообщения (избегаем TLObject ошибки)")
-            sent_messages = []
-            
-            for i, (message, media) in enumerate(zip(album_messages, media_files)):
-                try:
-                    if isinstance(media, tuple):
-                        file_data, filename = media
-                        # Отправляем как отдельный файл
-                        individual_kwargs = {
-                            'entity': self.target_entity,
-                            'file': (file_data, filename),
-                            'caption': caption if i == 0 else "",  # Текст только к первому файлу
-                        }
-                        
-                        if i == 0 and first_message.entities:
-                            individual_kwargs['formatting_entities'] = first_message.entities
-                            
-                        sent_msg = await self.client.send_file(**individual_kwargs)
-                        sent_messages.append(sent_msg)
-                        self.logger.debug(f"✓ Отправлен файл {i+1}/{len(media_files)}: {filename}")
-                        
-                    else:
-                        # Прямой медиа объект
-                        individual_kwargs = {
-                            'entity': self.target_entity,
-                            'file': media,
-                            'caption': caption if i == 0 else "",
-                        }
-                        
-                        if i == 0 and first_message.entities:
-                            individual_kwargs['formatting_entities'] = first_message.entities
-                            
-                        sent_msg = await self.client.send_file(**individual_kwargs)
-                        sent_messages.append(sent_msg)
-                        self.logger.debug(f"✓ Отправлен медиа объект {i+1}/{len(media_files)}")
-                        
-                except Exception as individual_error:
-                    self.logger.warning(f"Ошибка отправки файла {i+1}: {individual_error}")
-                    # Продолжаем с остальными файлами
+            # ВОЗВРАТ К СТАНДАРТНОЙ ОТПРАВКЕ АЛЬБОМОВ
+            sent_messages = await self.client.send_file(**send_kwargs)
             
             # Анализируем результат
             if isinstance(sent_messages, list):
