@@ -2,6 +2,24 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.6] - 2025-08-26
+
+### Fixed
+- **Album Text Extraction Issue**: Fixed album text copying when text is not in the first message
+  - **Root Cause**: Album text extraction only checked the first message, missing text in subsequent photos
+  - **Solution**: Created `extract_album_text()` function that checks ALL messages in album for text
+  - **Impact**: Album captions are now properly copied regardless of which photo contains the text
+  - **Technical Details**: 
+    - Added `extract_album_text()` method to both `AlbumHandler` and `TelegramCopier` classes
+    - Updated all album processing paths (send_album, dry_run, error fallback) to use new function
+    - Enhanced logging to show which message contains the text for debugging
+    - Maintains original text formatting (entities) from the message containing text
+
+### Code Quality Improvements
+- **Enhanced Documentation**: Added detailed docstrings for new album text extraction functionality
+- **Consistent Error Handling**: Improved album text fallback logic in media error scenarios
+- **Better Debugging**: Added debug logging to track which message contains album text
+
 ## [1.0.5] - 2025-08-26
 
 ### Fixed

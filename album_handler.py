@@ -120,8 +120,8 @@ class AlbumHandler:
                     return await self.send_single_message(target_entity, first_message)
                 return False
             
-            # Получаем текст из первого сообщения альбома
-            caption = first_message.message or ""
+            # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
+            caption, entities = self.extract_album_text(album_messages)
             
             # Подготавливаем параметры отправки
             send_kwargs = {
@@ -131,8 +131,8 @@ class AlbumHandler:
             }
             
             # ВАЖНО: Сохраняем форматирование текста
-            if first_message.entities:
-                send_kwargs['formatting_entities'] = first_message.entities
+            if entities:
+                send_kwargs['formatting_entities'] = entities
             
             # Отправляем как группированные медиа
             sent_messages = await self.client.send_file(**send_kwargs)
@@ -198,6 +198,27 @@ class AlbumHandler:
             self.logger.error(f"Ошибка отправки сообщения: {e}")
             return False
     
+    def extract_album_text(self, album_messages: List[Message]) -> tuple[str, Optional[List]]:
+        """
+        Извлечение текста и форматирования из любого сообщения альбома.
+        ИСПРАВЛЕНО: Теперь проверяет все сообщения альбома, а не только первое.
+        
+        Args:
+            album_messages: Список сообщений альбома
+        
+        Returns:
+            Кортеж (text, entities) где text - текст сообщения, entities - форматирование
+        """
+        # Проверяем все сообщения альбома на наличие текста
+        for message in album_messages:
+            if message.message and message.message.strip():
+                self.logger.debug(f"Найден текст в сообщении {message.id}: {message.message[:50]}...")
+                return message.message, message.entities
+        
+        # Если текст не найден ни в одном сообщении
+        self.logger.debug("Текст не найден ни в одном сообщении альбома")
+        return "", None
+
     def get_album_stats(self) -> Dict[str, int]:
         """
         Получение статистики по альбомам.

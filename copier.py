@@ -877,9 +877,30 @@ class TelegramCopier:
             self.logger.warning(f"Не удалось получить количество сообщений в целевом канале: {e}")
             return 0
     
+    def extract_album_text(self, album_messages: List[Message]) -> tuple[str, Optional[List]]:
+        """
+        Извлечение текста и форматирования из любого сообщения альбома.
+        ИСПРАВЛЕНО: Теперь проверяет все сообщения альбома, а не только первое.
+        
+        Args:
+            album_messages: Список сообщений альбома
+        
+        Returns:
+            Кортеж (text, entities) где text - текст сообщения, entities - форматирование
+        """
+        # Проверяем все сообщения альбома на наличие текста
+        for message in album_messages:
+            if message.message and message.message.strip():
+                self.logger.debug(f"Найден текст в сообщении {message.id}: {message.message[:50]}...")
+                return message.message, message.entities
+        
+        # Если текст не найден ни в одном сообщении
+        self.logger.debug("Текст не найден ни в одном сообщении альбома")
+        return "", None
+
     async def copy_album(self, album_messages: List[Message]) -> bool:
         """
-        Копирование альбома сообщений как единого целого.
+        Копирование альбома сообщений как единого целое.
         УПРОЩЕННАЯ ВЕРСИЯ: Все альбомы обрабатываются одинаково.
         
         Args:
@@ -898,7 +919,10 @@ class TelegramCopier:
             self.logger.debug(f"Копируем альбом из {len(album_messages)} сообщений")
             
             if self.dry_run:
-                self.logger.info(f"[DRY RUN] Альбом из {len(album_messages)} сообщений: {first_message.message[:50] if first_message.message else 'медиа'}")
+                # ИСПРАВЛЕНО: Показываем текст из любого сообщения альбома
+                album_text, _ = self.extract_album_text(album_messages)
+                display_text = album_text[:50] if album_text else 'медиа'
+                self.logger.info(f"[DRY RUN] Альбом из {len(album_messages)} сообщений: {display_text}")
                 return True
             
             # УПРОЩЕНИЕ: Определяем есть ли сообщения из discussion группы
@@ -922,16 +946,20 @@ class TelegramCopier:
             # Проверяем результат
             if not media_files:
                 self.logger.warning("Альбом не содержит медиа файлов")
-                # Если нет медиа, отправляем как обычное текстовое сообщение
-                if first_message.message:
+                # ИСПРАВЛЕНО: Ищем текст в любом сообщении альбома
+                album_text, _ = self.extract_album_text(album_messages)
+                if album_text:
                     self.logger.info("Отправляем только текст альбома, так как медиа недоступно")
-                    return await self.copy_single_message(first_message)
+                    # Создаем временное сообщение с найденным текстом для отправки
+                    message_with_text = next((msg for msg in album_messages if msg.message and msg.message.strip()), None)
+                    if message_with_text:
+                        return await self.copy_single_message(message_with_text)
                 else:
                     self.logger.warning("Альбом не содержит ни медиа, ни текста - пропускаем")
                     return False
             
-            # Получаем текст из первого сообщения альбома
-            caption = first_message.message or ""
+            # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
+            caption, entities = self.extract_album_text(album_messages)
             
             # Подготавливаем параметры для отправки альбома
             send_kwargs = {
@@ -940,9 +968,9 @@ class TelegramCopier:
                 'caption': caption,
             }
             
-            # Сохраняем форматирование текста из первого сообщения
-            if first_message.entities:
-                send_kwargs['formatting_entities'] = first_message.entities
+            # Сохраняем форматирование текста из сообщения с текстом
+            if entities:
+                send_kwargs['formatting_entities'] = entities
             
             # ОТЛАДКА: Информация о файлах в альбоме
             self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов")
@@ -973,17 +1001,17 @@ class TelegramCopier:
             
         except MediaInvalidError as e:
             self.logger.warning(f"Медиа альбома недоступно: {e}")
-            # Пытаемся отправить только текст
-            if album_messages and album_messages[0].message:
+            # ИСПРАВЛЕНО: Пытаемся отправить текст из любого сообщения альбома
+            caption, entities = self.extract_album_text(album_messages)
+            if caption:
                 try:
-                    first_message = album_messages[0]
                     text_kwargs = {
                         'entity': self.target_entity,
-                        'message': first_message.message,
+                        'message': caption,
                         'link_preview': False
                     }
-                    if first_message.entities:
-                        text_kwargs['formatting_entities'] = first_message.entities
+                    if entities:
+                        text_kwargs['formatting_entities'] = entities
                     await self.client.send_message(**text_kwargs)
                     self.logger.info(f"Отправлен только текст альбома (медиа недоступно)")
                     return True
