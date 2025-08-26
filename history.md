@@ -2,6 +2,24 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.5] - 2025-08-26
+
+### Fixed
+- **Complete Album Rewrite**: Simplified album processing to eliminate TLObject errors
+  - **Root Cause**: Complex logic led to mixed data types (tuples + objects) in single album
+  - **Solution**: All albums now download ALL files consistently as (data, filename) tuples
+  - **Impact**: Eliminates TLObject consistency errors, ensures uniform processing
+  
+- **Unified Processing Strategy**: Comments and main posts now processed identically
+  - **Philosophy**: "Comments are just posts" - no special handling needed
+  - **Implementation**: Single code path for all album files regardless of origin
+  - **Benefit**: Reduces complexity and potential for type mixing errors
+
+- **Enhanced HTML Detection**: Improved filtering of unsupported file types
+  - Added comprehensive HTML file detection in albums
+  - Better error handling for skipped files
+  - Cleaner logging for debugging media processing issues
+
 ## [1.0.4] - 2025-08-26
 
 ### Fixed

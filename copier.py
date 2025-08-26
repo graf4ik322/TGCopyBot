@@ -880,8 +880,7 @@ class TelegramCopier:
     async def copy_album(self, album_messages: List[Message]) -> bool:
         """
         Копирование альбома сообщений как единого целого.
-        ИСПРАВЛЕНО: Теперь работает с правильно собранными альбомами.
-        ИСПРАВЛЕНА ПРОБЛЕМА С АЛЬБОМАМИ В КОММЕНТАРИЯХ: сохраняются атрибуты файлов.
+        УПРОЩЕННАЯ ВЕРСИЯ: Все альбомы обрабатываются одинаково.
         
         Args:
             album_messages: Список сообщений альбома (отсортированный по ID)
@@ -902,141 +901,81 @@ class TelegramCopier:
                 self.logger.info(f"[DRY RUN] Альбом из {len(album_messages)} сообщений: {first_message.message[:50] if first_message.message else 'медиа'}")
                 return True
             
-            # Проверяем, нужно ли скачивать медиа (для комментариев из protected chats)
-            # ИСПРАВЛЕНИЕ: Проверяем все сообщения альбома, а не только первое
-            is_from_discussion_group = any(
+            # УПРОЩЕНИЕ: Определяем есть ли сообщения из discussion группы
+            has_discussion_messages = any(
                 hasattr(msg, '_is_from_discussion_group') and msg._is_from_discussion_group 
                 for msg in album_messages
             )
             
-            # Собираем все медиа файлы из альбома
+            self.logger.info(f"Альбом содержит сообщения из discussion group: {has_discussion_messages}")
+            
+            # НОВАЯ СТРАТЕГИЯ: Всегда скачиваем ВСЕ файлы для консистентности
+            # Это исключит любые проблемы с смешиванием типов данных
             media_files = []
-            all_downloaded = True  # Флаг для проверки, все ли файлы удалось скачать
+            skipped_files = 0
             
             for message in album_messages:
                 if message.media:
-                    # ИСПРАВЛЕНИЕ: Проверяем каждое сообщение индивидуально
-                    message_is_from_discussion = hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group
+                    # Определяем имя файла
+                    suggested_filename = f"media_{message.id}"
                     
-                    if message_is_from_discussion:
-                        # ИСПРАВЛЕНИЕ: Для комментариев скачиваем медиа с сохранением атрибутов
-                        self.logger.debug(f"Скачиваем медиа из комментария {message.id} для альбома с сохранением атрибутов")
+                    # Проверяем тип медиа и определяем имя файла
+                    skip_file = False
+                    
+                    if isinstance(message.media, MessageMediaPhoto):
+                        suggested_filename = f"photo_{message.id}.jpg"
+                    elif hasattr(message.media, 'document') and message.media.document:
+                        doc = message.media.document
+                        original_mime_type = getattr(doc, 'mime_type', None)
                         
-                        # Получаем информацию о файле из оригинального медиа
-                        original_attributes = None
-                        original_mime_type = None
-                        suggested_filename = None
+                        # КРИТИЧЕСКАЯ ПРОВЕРКА: Пропускаем HTML файлы
+                        if original_mime_type and (
+                            original_mime_type.startswith('text/html') or
+                            original_mime_type.startswith('application/html')
+                        ):
+                            self.logger.warning(f"Пропускаем HTML файл {message.id} в альбоме")
+                            skipped_files += 1
+                            skip_file = True
                         
-                        if hasattr(message.media, 'document') and message.media.document:
-                            doc = message.media.document
-                            original_attributes = doc.attributes if hasattr(doc, 'attributes') else []
-                            original_mime_type = getattr(doc, 'mime_type', None)
-                            
-                            # ИСПРАВЛЕНИЕ: Проверяем тип файла перед скачиванием для альбома
-                            # Пропускаем HTML файлы и другие не-медиа типы
-                            if original_mime_type and (
-                                original_mime_type.startswith('text/html') or
-                                original_mime_type.startswith('application/html')
-                            ):
-                                self.logger.warning(f"Пропускаем HTML файл в альбоме - неподдерживаемый тип медиа")
-                                all_downloaded = False
-                                continue
-                            
-                            # Пытаемся извлечь имя файла из атрибутов
+                        # Пытаемся получить оригинальное имя файла
+                        if not skip_file:
                             from telethon.tl.types import DocumentAttributeFilename
-                            for attr in original_attributes:
+                            for attr in doc.attributes if hasattr(doc, 'attributes') else []:
                                 if isinstance(attr, DocumentAttributeFilename):
                                     suggested_filename = attr.file_name
-                                    # Дополнительная проверка HTML в имени файла
-                                    if suggested_filename and suggested_filename.lower().endswith('.html'):
+                                    # Проверяем HTML в имени файла
+                                    if suggested_filename.lower().endswith('.html'):
                                         self.logger.warning(f"Пропускаем HTML файл {suggested_filename} в альбоме")
-                                        all_downloaded = False
-                                        continue
+                                        skipped_files += 1
+                                        skip_file = True
                                     break
-                            
-                            # Если имя файла не найдено, генерируем на основе MIME-типа
-                            if not suggested_filename:
-                                if original_mime_type:
-                                    if original_mime_type.startswith('image/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('video/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('audio/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
-                                    else:
-                                        suggested_filename = f"file_{message.id}"
-                                else:
-                                    suggested_filename = f"media_{message.id}"
-                        
-                        elif isinstance(message.media, MessageMediaPhoto):
-                            suggested_filename = f"photo_{message.id}.jpg"
-                            original_mime_type = "image/jpeg"
-                        
+                    
+                    # Скачиваем файл (единообразно для всех)
+                    if not skip_file:
                         try:
-                            # Скачиваем файл как bytes
+                            self.logger.debug(f"Скачиваем медиа {message.id} ({suggested_filename})")
                             downloaded_file = await self.client.download_media(message.media, file=bytes)
                             
-                            # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Используем единообразный формат для всех файлов в альбоме
-                            if downloaded_file and suggested_filename:
-                                # Используем кортеж (data, filename) для передачи имени файла
+                            if downloaded_file:
                                 media_files.append((downloaded_file, suggested_filename))
+                                self.logger.debug(f"✓ Скачан: {suggested_filename}, размер: {len(downloaded_file)} bytes")
                             else:
-                                self.logger.warning(f"Не удалось скачать медиа {message.id} для альбома")
-                                all_downloaded = False
+                                self.logger.warning(f"Не удалось скачать медиа {message.id}")
+                                skipped_files += 1
                         except Exception as e:
-                            self.logger.warning(f"Ошибка скачивания медиа {message.id} для альбома: {e}")
-                            all_downloaded = False
-                    else:
-                        # ИСПРАВЛЕНИЕ: Если в альбоме есть хотя бы один файл из комментариев,
-                        # скачиваем ВСЕ файлы для обеспечения единообразия
-                        if is_from_discussion_group:
-                            # Скачиваем основные файлы тоже для единообразия с комментариями
-                            try:
-                                self.logger.debug(f"Скачиваем основное медиа {message.id} для единообразия с комментариями в альбоме")
-                                downloaded_file = await self.client.download_media(message.media, file=bytes)
-                                suggested_filename = f"media_{message.id}"
-                                
-                                if isinstance(message.media, MessageMediaPhoto):
-                                    suggested_filename = f"photo_{message.id}.jpg"
-                                elif hasattr(message.media, 'document') and message.media.document:
-                                    # Пытаемся получить оригинальное имя файла
-                                    from telethon.tl.types import DocumentAttributeFilename
-                                    for attr in message.media.document.attributes:
-                                        if isinstance(attr, DocumentAttributeFilename):
-                                            suggested_filename = attr.file_name
-                                            break
-                                
-                                if downloaded_file:
-                                    media_files.append((downloaded_file, suggested_filename))
-                                else:
-                                    self.logger.warning(f"Не удалось скачать основное медиа {message.id} для альбома")
-                                    all_downloaded = False
-                            except Exception as e:
-                                self.logger.warning(f"Ошибка скачивания основного медиа {message.id} для альбома: {e}")
-                                all_downloaded = False
-                        else:
-                            # Если все файлы основные (нет комментариев), используем прямые ссылки
-                            media_files.append(message.media)
+                            self.logger.warning(f"Ошибка скачивания медиа {message.id}: {e}")
+                            skipped_files += 1
             
-            # ИСПРАВЛЕНИЕ: Проверяем результат сбора медиа файлов
+            # Проверяем результат
             if not media_files:
-                self.logger.warning("Альбом не содержит медиа файлов (все файлы отфильтрованы или не удалось скачать)")
+                self.logger.warning(f"Альбом не содержит медиа файлов (пропущено: {skipped_files})")
                 # Если нет медиа, отправляем как обычное текстовое сообщение
                 if first_message.message:
                     self.logger.info("Отправляем только текст альбома, так как медиа недоступно")
                     return await self.copy_single_message(first_message)
                 else:
                     self.logger.warning("Альбом не содержит ни медиа, ни текста - пропускаем")
-                return False
-            
-            # Дополнительная проверка на частичные ошибки
-            if not all_downloaded:
-                self.logger.warning(f"Альбом содержит {len(media_files)} файлов, но некоторые файлы не удалось обработать")
+                    return False
             
             # Получаем текст из первого сообщения альбома
             caption = first_message.message or ""
@@ -1044,38 +983,37 @@ class TelegramCopier:
             # Подготавливаем параметры для отправки альбома
             send_kwargs = {
                 'entity': self.target_entity,
-                'file': media_files,  # Массив медиа файлов (скачанных с именами или ссылок)
+                'file': media_files,
                 'caption': caption,
             }
             
-            # ВАЖНО: Сохраняем форматирование текста из первого сообщения
+            # Сохраняем форматирование текста из первого сообщения
             if first_message.entities:
                 send_kwargs['formatting_entities'] = first_message.entities
             
-            # ОТЛАДКА: Выводим информацию о типах файлов в альбоме
-            self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов")
+            # ОТЛАДКА: Информация о файлах в альбоме
+            self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов (пропущено: {skipped_files})")
             for i, media in enumerate(media_files):
                 if isinstance(media, tuple):
-                    self.logger.debug(f"  Файл {i+1}: скачанные данные, имя: {media[1]}")
+                    self.logger.info(f"  Файл {i+1}: {media[1]}, размер: {len(media[0])} bytes")
                 else:
-                    self.logger.debug(f"  Файл {i+1}: медиа объект типа {type(media)}")
+                    self.logger.info(f"  Файл {i+1}: медиа объект {type(media)}")
             
-            # Отправляем альбом как группированные медиа
+            # Отправляем альбом
             sent_messages = await self.client.send_file(**send_kwargs)
             
             # Анализируем результат
             if isinstance(sent_messages, list):
                 self.logger.info(f"✅ Альбом успешно отправлен как {len(sent_messages)} сообщений")
                 
-                # Обновляем трекер с реальными ID отправленных сообщений
+                # Обновляем трекер
                 if self.message_tracker and sent_messages:
                     source_ids = [msg.id for msg in album_messages]
                     target_ids = [msg.id for msg in sent_messages]
                     self.message_tracker.mark_album_copied(source_ids, target_ids)
             else:
-                self.logger.warning(f"⚠️ Альбом отправлен как одно сообщение {sent_messages.id} - возможна потеря группировки")
+                self.logger.warning(f"⚠️ Альбом отправлен как одно сообщение {sent_messages.id}")
                 
-                # Если получили одно сообщение вместо альбома
                 if self.message_tracker:
                     source_ids = [msg.id for msg in album_messages]
                     target_ids = [sent_messages.id]
@@ -1085,7 +1023,7 @@ class TelegramCopier:
             
         except MediaInvalidError as e:
             self.logger.warning(f"Медиа альбома недоступно: {e}")
-            # Пытаемся отправить только текст из первого сообщения
+            # Пытаемся отправить только текст
             if album_messages and album_messages[0].message:
                 try:
                     first_message = album_messages[0]
