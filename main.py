@@ -13,7 +13,7 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, PhoneNumberInvalidError
 
 from config import Config
-from utils import setup_logging, RateLimiter, load_last_message_id, ProcessLock
+from utils import setup_logging, RateLimiter, load_last_message_id, ProcessLock, create_mobile_friendly_box, truncate_text
 from copier import TelegramCopier
 
 
@@ -315,13 +315,20 @@ class TelegramCopierApp:
             # Проверяем успешность авторизации
             if await self.client.is_user_authorized():
                 me = await self.client.get_me()
-                self.logger.info("╔══════════════════════════════════════════════════════════════╗")
-                self.logger.info("║                   ✅ АВТОРИЗАЦИЯ УСПЕШНА                    ║")
-                self.logger.info("╠══════════════════════════════════════════════════════════════╣")
-                self.logger.info(f"║ 👤 Пользователь: {(me.first_name + ' ' + (me.last_name or '')).strip():<40} ║")
-                self.logger.info(f"║ 📱 Username: @{(me.username or 'отсутствует'):<45} ║")
-                self.logger.info(f"║ 🆔 User ID: {me.id:<49} ║")
-                self.logger.info("╚══════════════════════════════════════════════════════════════╝")
+                
+                # МОБИЛЬНО-АДАПТИВНОЕ форматирование пользователя
+                full_name = (me.first_name + ' ' + (me.last_name or '')).strip()
+                username = me.username or 'отсутствует'
+                
+                content_lines = [
+                    f"👤 {truncate_text(full_name, 35)}",
+                    f"📱 @{truncate_text(username, 34)}",
+                    f"🆔 {me.id}"
+                ]
+                
+                box_lines = create_mobile_friendly_box("✅ АВТОРИЗАЦИЯ УСПЕШНА", content_lines)
+                for line in box_lines:
+                    self.logger.info(line)
                 return True
             else:
                 self.logger.error("Авторизация не удалась")
@@ -362,19 +369,22 @@ class TelegramCopierApp:
             # Проверяем, нужно ли возобновить с определенного места
             resume_from_id = load_last_message_id(self.config.resume_file)
             if resume_from_id:
-                self.logger.info("╔══════════════════════════════════════════════════════════════╗")
-                self.logger.info("║                    🔄 ВОЗОБНОВЛЕНИЕ РАБОТЫ                  ║")
-                self.logger.info("╠══════════════════════════════════════════════════════════════╣")
-                self.logger.info(f"║ 📍 Продолжаем с сообщения ID: {resume_from_id:<30} ║")
-                self.logger.info("║ 💡 Уже обработанные сообщения будут пропущены              ║")
-                self.logger.info("╚══════════════════════════════════════════════════════════════╝")
+                content_lines = [
+                    f"📍 С сообщения ID: {resume_from_id}",
+                    "💡 Обработанные пропускаются"
+                ]
+                box_lines = create_mobile_friendly_box("🔄 ВОЗОБНОВЛЕНИЕ", content_lines)
+                for line in box_lines:
+                    self.logger.info(line)
             else:
-                self.logger.info("╔══════════════════════════════════════════════════════════════╗")
-                self.logger.info("║                     🚀 НАЧАЛО КОПИРОВАНИЯ                   ║")
-                self.logger.info("╠══════════════════════════════════════════════════════════════╣")
-                self.logger.info("║ 📍 Начинаем обработку с начала канала                      ║")
-                self.logger.info(f"║ 📊 Режим: {'🔍 Симуляция (DRY RUN)' if self.config.dry_run else '✅ Реальное копирование':<41} ║")
-                self.logger.info("╚══════════════════════════════════════════════════════════════╝")
+                mode_text = "🔍 Симуляция" if self.config.dry_run else "✅ Реальное копирование"
+                content_lines = [
+                    "📍 С начала канала",
+                    f"📊 Режим: {mode_text}"
+                ]
+                box_lines = create_mobile_friendly_box("🚀 НАЧАЛО КОПИРОВАНИЯ", content_lines)
+                for line in box_lines:
+                    self.logger.info(line)
             
             # Запускаем копирование
             self.running = True
@@ -425,11 +435,7 @@ class TelegramCopierApp:
                     self.logger.info("🔄 Новых сообщений для копирования не найдено")
                     self.logger.info("💡 Запустите скрипт позже, когда появятся новые сообщения")
                 else:
-                    # УЛУЧШЕННАЯ финальная статистика с лучшим форматированием
-                    self.logger.info("╔══════════════════════════════════════════════════════════════╗")
-                    self.logger.info("║                    📊 ФИНАЛЬНАЯ СТАТИСТИКА                  ║")
-                    self.logger.info("╠══════════════════════════════════════════════════════════════╣")
-                    
+                    # МОБИЛЬНО-АДАПТИВНАЯ финальная статистика
                     total_msg = stats.get('total_messages', 0)
                     copied_msg = stats.get('copied_messages', 0)
                     failed_msg = stats.get('failed_messages', 0)
@@ -438,47 +444,53 @@ class TelegramCopierApp:
                     # Подсчет успешности
                     success_rate = (copied_msg / total_msg * 100) if total_msg > 0 else 0
                     
-                    self.logger.info(f"║ 📝 Всего обработано единиц:     {total_msg:>10} сообщений    ║")
-                    self.logger.info(f"║ ✅ Успешно скопировано:         {copied_msg:>10} сообщений    ║")
-                    self.logger.info(f"║ ❌ Ошибок при копировании:      {failed_msg:>10} сообщений    ║")
-                    self.logger.info(f"║ ⏭️ Пропущено (дубликаты):       {skipped_msg:>10} сообщений    ║")
-                    self.logger.info(f"║ 📈 Процент успешности:          {success_rate:>9.1f}%          ║")
-                    
-                    # Показываем проверку целевого канала, если доступна
-                    if 'target_messages_count' in stats:
-                        target_count = stats['target_messages_count']
-                        self.logger.info(f"║ 🎯 В целевом канале итого:      {target_count:>10} сообщений    ║")
-                    
                     # Временная статистика
                     elapsed = stats.get('elapsed_time', 0)
                     speed = stats.get('messages_per_minute', 0)
                     
                     if elapsed < 60:
-                        time_str = f"{elapsed:.1f} сек"
+                        time_str = f"{elapsed:.1f}с"
                     elif elapsed < 3600:
-                        time_str = f"{elapsed/60:.1f} мин"
+                        time_str = f"{elapsed/60:.1f}м"
                     else:
                         hours = elapsed // 3600
                         minutes = (elapsed % 3600) // 60
-                        time_str = f"{hours:.0f}ч {minutes:.0f}м"
+                        time_str = f"{hours:.0f}ч{minutes:.0f}м"
                     
-                    self.logger.info(f"║ ⏱️ Время выполнения:            {time_str:>15}        ║")
-                    self.logger.info(f"║ 🚀 Скорость обработки:          {speed:>9.1f} ед/мин       ║")
-                    self.logger.info("╚══════════════════════════════════════════════════════════════╝")
+                    content_lines = [
+                        f"📝 Обработано: {total_msg}",
+                        f"✅ Скопировано: {copied_msg}",
+                        f"❌ Ошибок: {failed_msg}",
+                        f"⏭️ Пропущено: {skipped_msg}",
+                        f"📈 Успешность: {success_rate:.1f}%",
+                        f"⏱️ Время: {time_str}",
+                        f"🚀 Скорость: {speed:.1f}/мин"
+                    ]
+                    
+                    # Добавляем целевой канал если доступно
+                    if 'target_messages_count' in stats:
+                        target_count = stats['target_messages_count']
+                        content_lines.append(f"🎯 В целевом: {target_count}")
+                    
+                    box_lines = create_mobile_friendly_box("📊 СТАТИСТИКА", content_lines)
+                    for line in box_lines:
+                        self.logger.info(line)
                 
                 if self.config.dry_run:
                     self.logger.info("")
-                    self.logger.info("╔══════════════════════════════════════════════════════════════╗")
-                    self.logger.info("║          🔍 РЕЖИМ СИМУЛЯЦИИ - РЕАЛЬНАЯ ОТПРАВКА НЕ          ║")
-                    self.logger.info("║                        ВЫПОЛНЯЛАСЬ                          ║")
-                    self.logger.info("║   💡 Для реального копирования уберите --dry-run            ║")
-                    self.logger.info("╚══════════════════════════════════════════════════════════════╝")
+                    content_lines = [
+                        "Реальная отправка НЕ выполнялась",
+                        "💡 Уберите --dry-run для реального копирования"
+                    ]
+                    box_lines = create_mobile_friendly_box("🔍 РЕЖИМ СИМУЛЯЦИИ", content_lines)
+                    for line in box_lines:
+                        self.logger.info(line)
                 
                 self.logger.info("")
-                self.logger.info("╔══════════════════════════════════════════════════════════════╗")
-                self.logger.info("║                 🎉 КОПИРОВАНИЕ ЗАВЕРШЕНО                    ║")
-                self.logger.info("║                       УСПЕШНО                               ║")
-                self.logger.info("╚══════════════════════════════════════════════════════════════╝")
+                content_lines = ["Операция выполнена успешно"]
+                box_lines = create_mobile_friendly_box("🎉 ЗАВЕРШЕНО", content_lines)
+                for line in box_lines:
+                    self.logger.info(line)
                 return 0
         
         except RuntimeError as e:

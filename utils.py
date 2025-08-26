@@ -17,6 +17,7 @@ from telethon.errors import FloodWaitError, PeerFloodError
 def setup_logging(log_level: str = 'INFO') -> logging.Logger:
     """
     Настройка системы логирования.
+    ИСПРАВЛЕНО: Мобильно-адаптивное форматирование для лучшего UX.
     
     Args:
         log_level: Уровень логирования (DEBUG, INFO, WARNING, ERROR)
@@ -31,14 +32,20 @@ def setup_logging(log_level: str = 'INFO') -> logging.Logger:
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     
-    # Создаем форматтер
-    formatter = logging.Formatter(
+    # МОБИЛЬНО-АДАПТИВНЫЙ форматтер для консоли (короткий)
+    console_formatter = logging.Formatter(
+        '%(asctime)s | %(message)s',
+        datefmt='%H:%M:%S'  # Только время, без даты
+    )
+    
+    # Полный форматтер для файла (подробный)
+    file_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     
-    # Консольный обработчик
+    # Консольный обработчик с коротким форматом
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
     
     # ИСПРАВЛЕНО: Файловый обработчик в правильной директории
@@ -46,10 +53,82 @@ def setup_logging(log_level: str = 'INFO') -> logging.Logger:
     os.makedirs(data_dir, exist_ok=True)
     log_file = os.path.join(data_dir, 'telegram_copier.log')
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
     
     return logger
+
+
+def create_mobile_friendly_box(title: str, content_lines: list, max_width: int = 50) -> list:
+    """
+    Создает мобильно-адаптивную рамку для текста.
+    
+    Args:
+        title: Заголовок рамки
+        content_lines: Список строк контента
+        max_width: Максимальная ширина (адаптируется к контенту)
+    
+    Returns:
+        Список строк для вывода
+    """
+    # Определяем реальную ширину на основе контента
+    content_width = max(
+        len(title),
+        max(len(line) for line in content_lines) if content_lines else 0,
+        30  # Минимальная ширина
+    )
+    # Ограничиваем максимальную ширину для мобильных устройств
+    width = min(content_width + 4, max_width)
+    
+    lines = []
+    
+    # Верхняя граница
+    lines.append("╔" + "═" * (width - 2) + "╗")
+    
+    # Заголовок по центру
+    title_padding = (width - 2 - len(title)) // 2
+    title_line = "║" + " " * title_padding + title + " " * (width - 2 - title_padding - len(title)) + "║"
+    lines.append(title_line)
+    
+    # Разделитель
+    if content_lines:
+        lines.append("╠" + "═" * (width - 2) + "╣")
+    
+    # Контент с автоматическим переносом для длинных строк
+    for line in content_lines:
+        if len(line) <= width - 4:
+            # Короткая строка - помещается в одну линию
+            padding = width - 4 - len(line)
+            content_line = "║ " + line + " " * padding + " ║"
+            lines.append(content_line)
+        else:
+            # Длинная строка - разбиваем на части
+            chunks = [line[i:i+width-4] for i in range(0, len(line), width-4)]
+            for chunk in chunks:
+                padding = width - 4 - len(chunk)
+                content_line = "║ " + chunk + " " * padding + " ║"
+                lines.append(content_line)
+    
+    # Нижняя граница
+    lines.append("╚" + "═" * (width - 2) + "╝")
+    
+    return lines
+
+
+def truncate_text(text: str, max_length: int) -> str:
+    """
+    Обрезает текст до указанной длины с многоточием.
+    
+    Args:
+        text: Исходный текст
+        max_length: Максимальная длина
+    
+    Returns:
+        Обрезанный текст
+    """
+    if len(text) <= max_length:
+        return text
+    return text[:max_length-3] + "..."
 
 
 class RateLimiter:

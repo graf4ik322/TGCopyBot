@@ -2,6 +2,36 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.0.9] - 2025-08-26
+
+### Mobile UX/UI Critical Fixes
+- **Mobile Formatting Issues**: COMPLETELY FIXED console output breaking on mobile devices
+  - **Root Cause**: Long logger prefixes and fixed-width boxes broke formatting on narrow screens
+  - **Solution**: Implemented mobile-adaptive formatting system with responsive boxes
+  - **Impact**: Perfect display on mobile phones, tablets, and narrow terminal windows
+  - **Technical Implementation**:
+    - Created `create_mobile_friendly_box()` function with adaptive width
+    - Implemented `truncate_text()` for handling long usernames gracefully
+    - Added automatic line wrapping for long content
+    - Optimized logger format: `HH:MM:SS | message` (65% shorter than before)
+
+- **Logger Format Optimization**: Redesigned console output for mobile readability
+  - **Before**: `2025-08-27 00:04:10,567 - telegram_copier.copier - INFO - message` (breaks on mobile)
+  - **After**: `00:04:10 | message` (mobile-friendly, 65% shorter)
+  - **Benefits**: Cleaner output, better mobile readability, reduced visual clutter
+
+### User Experience Improvements
+- **Adaptive Box Layout**: All UI boxes now automatically adjust to content and screen width
+  - Minimum width: 30 characters (works on smallest mobile screens)
+  - Maximum width: 50 characters (prevents line breaking on larger screens)
+  - Auto-wrapping for content that exceeds box width
+  - Smart truncation for long usernames and text content
+
+- **Mobile-Optimized Statistics**: Redesigned final statistics for compact mobile display
+  - **Before**: Wide fixed-width table format (broke on mobile)
+  - **After**: Compact vertical layout with emoji indicators
+  - All information preserved in mobile-friendly format
+
 ## [1.0.8] - 2025-08-26
 
 ### Critical Bug Fix
