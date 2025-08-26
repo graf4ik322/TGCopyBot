@@ -1061,110 +1061,51 @@ class TelegramCopier:
             if message.entities:
                 send_kwargs['formatting_entities'] = message.entities
             
-            # Обрабатываем медиа для полного 1:1 копирования
+            # Обрабатываем медиа - ВСЕ СООБЩЕНИЯ ОДИНАКОВО
             if message.media:
-                # Проверяем, нужно ли скачивать медиа (для protected chats)
-                is_from_discussion_group = hasattr(message, '_is_from_discussion_group') and message._is_from_discussion_group
-                
                 if isinstance(message.media, MessageMediaPhoto):
-                    # Для фотографий
-                    if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ: Для комментариев скачиваем и загружаем заново с сохранением атрибутов
-                        self.logger.debug(f"Скачиваем фото из комментария {message.id} для повторной загрузки с атрибутами")
-                        downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        # Определяем имя файла для фото
-                        suggested_filename = f"photo_{message.id}.jpg"
-                        
-                        file_kwargs = {
-                            'entity': self.target_entity,
-                            'file': (downloaded_file, suggested_filename),  # Передаем как кортеж (data, filename)
-                            'caption': text,
-                            'force_document': False
-                        }
-                    else:
-                        # Для основных сообщений используем прямую ссылку
-                        file_kwargs = {
-                            'entity': self.target_entity,
-                            'file': message.media,
-                            'caption': text,
-                            'force_document': False
-                        }
+                    # Для фотографий - стандартная обработка
+                    file_kwargs = {
+                        'entity': self.target_entity,
+                        'file': message.media,
+                        'caption': text,
+                        'force_document': False
+                    }
                     
                     if message.entities:
                         file_kwargs['formatting_entities'] = message.entities
                     sent_message = await self.client.send_file(**file_kwargs)
                     
                 elif isinstance(message.media, MessageMediaDocument):
-                    # Для документов/видео/аудио
-                    if is_from_discussion_group:
-                        # ИСПРАВЛЕНИЕ: Для комментариев скачиваем и загружаем заново с сохранением атрибутов
-                        self.logger.debug(f"Скачиваем документ из комментария {message.id} для повторной загрузки с атрибутами")
+                    # Для документов/видео/аудио - проверяем HTML файлы
+                    if hasattr(message.media, 'document') and message.media.document:
+                        doc = message.media.document
+                        original_mime_type = getattr(doc, 'mime_type', None)
                         
-                        # Получаем информацию о файле из оригинального медиа
-                        suggested_filename = None
-                        original_mime_type = None
-                        
-                        if hasattr(message.media, 'document') and message.media.document:
-                            doc = message.media.document
-                            original_attributes = doc.attributes if hasattr(doc, 'attributes') else []
-                            original_mime_type = getattr(doc, 'mime_type', None)
-                            
-                            # Пытаемся извлечь имя файла из атрибутов
-                            from telethon.tl.types import DocumentAttributeFilename
-                            for attr in original_attributes:
-                                if isinstance(attr, DocumentAttributeFilename):
-                                    suggested_filename = attr.file_name
-                                    break
-                            
-                            # Если имя файла не найдено, генерируем на основе MIME-типа
-                            if not suggested_filename:
-                                if original_mime_type:
-                                    if original_mime_type.startswith('image/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('video/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif original_mime_type.startswith('audio/'):
-                                        extension = original_mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
-                                    else:
-                                        suggested_filename = f"document_{message.id}"
-                                else:
-                                    suggested_filename = f"document_{message.id}"
-                        
-                        if not suggested_filename:
-                            suggested_filename = f"document_{message.id}"
-                        
-                        # ИСПРАВЛЕНИЕ: Проверяем тип файла перед скачиванием
-                        # Пропускаем HTML файлы и другие не-медиа типы
+                        # Проверяем на HTML файлы и пропускаем их
                         if original_mime_type and (
                             original_mime_type.startswith('text/html') or
-                            original_mime_type.startswith('application/html') or
-                            suggested_filename.lower().endswith('.html')
+                            original_mime_type.startswith('application/html')
                         ):
-                            self.logger.warning(f"Пропускаем HTML файл {suggested_filename} - неподдерживаемый тип медиа")
+                            self.logger.warning(f"Пропускаем HTML файл - неподдерживаемый тип медиа")
                             return False
                         
-                        downloaded_file = await self.client.download_media(message.media, file=bytes)
-                        
-                        file_kwargs = {
-                            'entity': self.target_entity,
-                            'file': (downloaded_file, suggested_filename),  # Передаем как кортеж (data, filename)
-                            'caption': text,
-                            'force_document': True
-                        }
-                    else:
-                        # Для основных сообщений используем прямую ссылку
-                        file_kwargs = {
-                            'entity': self.target_entity,
-                            'file': message.media,
-                            'caption': text,
-                            'force_document': True
-                        }
+                        # Проверяем имя файла на HTML
+                        from telethon.tl.types import DocumentAttributeFilename
+                        for attr in doc.attributes if hasattr(doc, 'attributes') else []:
+                            if isinstance(attr, DocumentAttributeFilename):
+                                if attr.file_name.lower().endswith('.html'):
+                                    self.logger.warning(f"Пропускаем HTML файл {attr.file_name} - неподдерживаемый тип медиа")
+                                    return False
+                                break
+                    
+                    # Стандартная обработка для всех документов
+                    file_kwargs = {
+                        'entity': self.target_entity,
+                        'file': message.media,
+                        'caption': text,
+                        'force_document': True
+                    }
                     
                     if message.entities:
                         file_kwargs['formatting_entities'] = message.entities
@@ -1173,55 +1114,13 @@ class TelegramCopier:
                     # Для веб-страниц отправляем только текст с entities
                     sent_message = await self.client.send_message(**send_kwargs)
                 else:
-                    # Для других типов медиа пытаемся отправить как есть
+                    # Для других типов медиа - стандартная обработка
                     try:
-                        if is_from_discussion_group:
-                            # ИСПРАВЛЕНИЕ: Для комментариев скачиваем и загружаем заново с атрибутами
-                            self.logger.debug(f"Скачиваем медиа типа {type(message.media)} из комментария {message.id} с атрибутами")
-                            
-                            # Генерируем базовое имя файла
-                            suggested_filename = f"media_{message.id}"
-                            
-                            # Пытаемся определить расширение по типу медиа
-                            if hasattr(message.media, 'document') and message.media.document:
-                                doc = message.media.document
-                                mime_type = getattr(doc, 'mime_type', None)
-                                
-                                # ИСПРАВЛЕНИЕ: Проверяем тип файла перед скачиванием
-                                if mime_type and (
-                                    mime_type.startswith('text/html') or
-                                    mime_type.startswith('application/html')
-                                ):
-                                    self.logger.warning(f"Пропускаем HTML файл - неподдерживаемый тип медиа")
-                                    return False
-                                
-                                if mime_type:
-                                    if mime_type.startswith('image/'):
-                                        extension = mime_type.split('/')[-1]
-                                        if extension == 'jpeg':
-                                            extension = 'jpg'
-                                        suggested_filename = f"image_{message.id}.{extension}"
-                                    elif mime_type.startswith('video/'):
-                                        extension = mime_type.split('/')[-1]
-                                        suggested_filename = f"video_{message.id}.{extension}"
-                                    elif mime_type.startswith('audio/'):
-                                        extension = mime_type.split('/')[-1]
-                                        suggested_filename = f"audio_{message.id}.{extension}"
-                            
-                            downloaded_file = await self.client.download_media(message.media, file=bytes)
-                            
-                            file_kwargs = {
-                                'entity': self.target_entity,
-                                'file': (downloaded_file, suggested_filename),  # Передаем как кортеж (data, filename)
-                                'caption': text
-                            }
-                        else:
-                            # Для основных сообщений используем прямую ссылку
-                            file_kwargs = {
-                                'entity': self.target_entity,
-                                'file': message.media,
-                                'caption': text
-                            }
+                        file_kwargs = {
+                            'entity': self.target_entity,
+                            'file': message.media,
+                            'caption': text
+                        }
                         
                         if message.entities:
                             file_kwargs['formatting_entities'] = message.entities
