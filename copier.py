@@ -465,8 +465,31 @@ class TelegramCopier:
             # Было прерывание из-за FloodWait, проверяем можно ли возобновить
             flood_resume_id = flood_state.get('message_id')
             if flood_resume_id and not resume_from_id:
-                resume_from_id = flood_resume_id
-                self.logger.warning(f"🔄 Возобновление после FloodWait с сообщения ID:{flood_resume_id}")
+                # ИСПРАВЛЕНИЕ: Обрабатываем как альбомы так и одиночные сообщения
+                if isinstance(flood_resume_id, str) and flood_resume_id.startswith('Album '):
+                    # Это альбом, извлекаем последний ID из диапазона "Album 12111-12112"
+                    try:
+                        album_range = flood_resume_id.replace('Album ', '')
+                        if '-' in album_range:
+                            start_id, end_id = album_range.split('-')
+                            resume_from_id = int(end_id)  # Возобновляем с последнего ID альбома
+                            self.logger.warning(f"🔄 Возобновление после FloodWait альбома {flood_resume_id}, начинаем с ID:{resume_from_id}")
+                        else:
+                            resume_from_id = int(album_range)
+                            self.logger.warning(f"🔄 Возобновление после FloodWait альбома {flood_resume_id}, начинаем с ID:{resume_from_id}")
+                    except (ValueError, IndexError) as e:
+                        self.logger.error(f"❌ Ошибка парсинга ID альбома из FloodWait состояния '{flood_resume_id}': {e}")
+                        self.logger.warning("⚠️ Игнорируем некорректное состояние FloodWait, начинаем сначала")
+                        flood_resume_id = None
+                elif isinstance(flood_resume_id, (int, str)):
+                    # Это одиночное сообщение
+                    try:
+                        resume_from_id = int(flood_resume_id)
+                        self.logger.warning(f"🔄 Возобновление после FloodWait с сообщения ID:{resume_from_id}")
+                    except ValueError as e:
+                        self.logger.error(f"❌ Ошибка парсинга ID сообщения из FloodWait состояния '{flood_resume_id}': {e}")
+                        self.logger.warning("⚠️ Игнорируем некорректное состояние FloodWait, начинаем сначала")
+                        flood_resume_id = None
 
         # Определяем начальную позицию
         if self.message_tracker and not resume_from_id:

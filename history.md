@@ -2,6 +2,44 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.5] - 2025-01-27
+
+### CRITICAL TYPE ERROR FIX: Album Resume After FloodWait
+- **CRITICAL BUG FIX**: Fixed type comparison error when resuming after FloodWait with albums
+  - **Root Cause**: `'<=' not supported between instances of 'int' and 'str'` error during resume
+  - **Problem**: Album IDs were saved as strings like "Album 12111-12112" but used as integers in comparisons
+  - **User Impact**: Script crashed immediately on resume after FloodWait interruption with albums
+  - **Solution**: Enhanced type handling for both single messages (int) and albums (str) in FloodWait state
+
+### Technical Implementation Details
+- **Enhanced `handle_media_flood_wait()`**: Now accepts `Union[int, str]` for message_id parameter
+  - **Album Support**: Properly handles album descriptors like "Album 12111-12112" 
+  - **Type Safety**: Maintains compatibility with single message IDs (int)
+  - **Context Logging**: Improved logging for both albums and single messages
+- **Enhanced `save_flood_wait_state()`**: Now accepts `Union[int, str]` for message_id parameter
+  - **Flexible Storage**: Can store both numeric IDs and album descriptors
+  - **Documentation**: Updated docstring to reflect album support
+- **Enhanced Resume Logic in `copier.py`**: Smart parsing of FloodWait state
+  - **Album Parsing**: Extracts numeric resume ID from "Album 12111-12112" format
+  - **Range Handling**: Uses last ID from album range for proper resume point
+  - **Error Handling**: Graceful fallback when FloodWait state is corrupted
+  - **Type Validation**: Comprehensive validation of resume ID format
+
+### Resume Logic Improvements
+- **Smart Album Parsing**: Automatically extracts resume point from album ranges
+  - `"Album 12111-12112"` → Resume from ID `12112` (last message in album)
+  - `"Album 12345"` → Resume from ID `12345` (single album message)
+- **Backward Compatibility**: Still handles traditional numeric resume IDs
+- **Error Recovery**: Invalid FloodWait states are ignored with warning, script continues from beginning
+- **Comprehensive Logging**: Clear messages about resume source and extracted IDs
+
+### Impact & Benefits
+- **✅ No More Type Errors**: Fixed `'<=' not supported between instances of 'int' and 'str'` crashes
+- **✅ Reliable Album Resume**: Albums can be properly resumed after FloodWait interruptions
+- **✅ Type Safety**: All FloodWait functions now handle mixed types correctly
+- **✅ Robust Error Handling**: Corrupted states don't crash the script
+- **✅ Improved Debugging**: Better logging for resume operations
+
 ## [1.1.4] - 2025-01-27
 
 ### CRITICAL CHRONOLOGY FIX: FloodWait Handling Logic

@@ -242,7 +242,7 @@ async def handle_flood_wait(error: FloodWaitError, logger: logging.Logger, conte
         logger.info(f"✅ FloodWait ({context}) завершен, продолжаем работу")
         return True
 
-async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger, message_id: int = None) -> bool:
+async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger, message_id: Union[int, str] = None) -> bool:
     """
     ИСПРАВЛЕНО: Правильная обработка FloodWaitError для медиа операций.
     КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Теперь ВСЕГДА ждет окончания FloodWait, никогда не пропускает сообщения.
@@ -250,7 +250,7 @@ async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger,
     Args:
         error: Ошибка FloodWaitError от Telegram API  
         logger: Logger для записи информации
-        message_id: ID сообщения для контекста
+        message_id: ID сообщения (int) или описание альбома (str) для контекста
         
     Returns:
         True - всегда, так как мы всегда ждем окончания FloodWait
@@ -311,7 +311,10 @@ async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger,
         
         # Дополнительная пауза для безопасности
         await asyncio.sleep(5)
-        logger.info(f"✅ Media FloodWait завершен, продолжаем с сообщения {message_id}")
+        if isinstance(message_id, str) and message_id.startswith('Album'):
+            logger.info(f"✅ Media FloodWait завершен, продолжаем с альбома {message_id}")
+        else:
+            logger.info(f"✅ Media FloodWait завершен, продолжаем с сообщения {message_id}")
     
     # ВСЕГДА возвращаем True - мы дождались окончания FloodWait
     return True
@@ -354,12 +357,13 @@ def save_last_message_id(message_id: int, filename: str = 'last_message_id.txt')
         except:
             pass
 
-def save_flood_wait_state(message_id: int, wait_time: int, reason: str) -> None:
+def save_flood_wait_state(message_id: Union[int, str], wait_time: int, reason: str) -> None:
     """
-    Сохранение состояния при критическом FloodWait для последующего возобновления.
+    ИСПРАВЛЕНО: Сохранение состояния при критическом FloodWait для последующего возобновления.
+    Поддерживает как одиночные сообщения (int), так и альбомы (str).
     
     Args:
-        message_id: ID сообщения, на котором произошел FloodWait
+        message_id: ID сообщения (int) или описание альбома (str), на котором произошел FloodWait
         wait_time: Время ожидания в секундах
         reason: Причина FloodWait
     """
