@@ -175,17 +175,97 @@ class RateLimiter:
         self.message_times.append(time.time())
 
 
-async def handle_flood_wait(error: FloodWaitError, logger: logging.Logger) -> None:
+async def handle_flood_wait(error: FloodWaitError, logger: logging.Logger, context: str = "") -> bool:
     """
-    Обработка ошибки FloodWaitError.
+    Интеллектуальная обработка ошибки FloodWaitError с адаптивными стратегиями.
     
     Args:
         error: Ошибка FloodWaitError от Telegram API
         logger: Logger для записи информации
+        context: Контекст операции для лучшего логирования
+    
+    Returns:
+        True если стоит повторить операцию, False если следует пропустить
     """
     wait_time = error.seconds
-    logger.warning(f"FloodWaitError: ожидание {wait_time} секунд")
-    await asyncio.sleep(wait_time)
+    
+    # Определяем стратегию в зависимости от времени ожидания
+    if wait_time <= 10:
+        # Короткое ожидание - ждем
+        logger.warning(f"🕐 FloodWait ({context}): ожидание {wait_time}с - ЖДЕМ")
+        await asyncio.sleep(wait_time)
+        return True
+    elif wait_time <= 60:
+        # Среднее ожидание - ждем с предупреждением
+        logger.warning(f"⏰ FloodWait ({context}): ожидание {wait_time}с - ЖДЕМ (среднее)")
+        await asyncio.sleep(wait_time)
+        return True
+    elif wait_time <= 300:  # 5 минут
+        # Длительное ожидание - ждем с подробным логированием
+        logger.warning(f"⏳ FloodWait ({context}): ожидание {wait_time}с ({wait_time//60}м{wait_time%60}с) - ЖДЕМ (долгое)")
+        # Ждем с промежуточными сообщениями каждые 30 секунд
+        elapsed = 0
+        while elapsed < wait_time:
+            sleep_chunk = min(30, wait_time - elapsed)
+            await asyncio.sleep(sleep_chunk)
+            elapsed += sleep_chunk
+            if elapsed < wait_time:
+                remaining = wait_time - elapsed
+                logger.info(f"⏳ FloodWait ({context}): осталось {remaining}с ({remaining//60}м{remaining%60}с)")
+        return True
+    else:
+        # Очень длительное ожидание (>5 минут) - пропускаем с возможностью повтора позже
+        logger.error(f"🚫 FloodWait ({context}): слишком долгое ожидание {wait_time}с ({wait_time//60}м) - ПРОПУСКАЕМ")
+        logger.error(f"💡 Рекомендуется возобновить работу через {wait_time//60} минут")
+        return False
+
+async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger, message_id: int = None) -> bool:
+    """
+    Специализированная обработка FloodWaitError для медиа операций.
+    
+    Args:
+        error: Ошибка FloodWaitError от Telegram API  
+        logger: Logger для записи информации
+        message_id: ID сообщения для контекста
+        
+    Returns:
+        True если стоит повторить операцию, False если следует пропустить
+    """
+    wait_time = error.seconds
+    context = f"Media Upload (msg {message_id})" if message_id else "Media Upload"
+    
+    # Для медиа операций более строгие лимиты
+    if wait_time <= 30:
+        logger.warning(f"📸 Media FloodWait: ожидание {wait_time}с - ЖДЕМ")
+        await asyncio.sleep(wait_time + 1)  # +1 секунда для безопасности
+        return True
+    elif wait_time <= 120:  # 2 минуты
+        logger.warning(f"📸 Media FloodWait: ожидание {wait_time}с ({wait_time//60}м{wait_time%60}с) - ЖДЕМ")
+        await asyncio.sleep(wait_time + 2)  # +2 секунды для безопасности
+        return True
+    elif wait_time <= 600:  # 10 минут
+        logger.warning(f"📸 Media FloodWait: долгое ожидание {wait_time}с ({wait_time//60}м) - ЖДЕМ с паузами")
+        # Ждем с промежуточными сообщениями
+        elapsed = 0
+        while elapsed < wait_time:
+            sleep_chunk = min(60, wait_time - elapsed)  # Проверяем каждую минуту
+            await asyncio.sleep(sleep_chunk)
+            elapsed += sleep_chunk
+            if elapsed < wait_time:
+                remaining = wait_time - elapsed
+                logger.info(f"📸 Media FloodWait: осталось {remaining}с ({remaining//60}м)")
+        await asyncio.sleep(3)  # Дополнительная пауза для безопасности
+        return True
+    else:
+        # Более 10 минут - пропускаем и сохраняем состояние
+        logger.error(f"🚫 Media FloodWait: критически долгое ожидание {wait_time}с ({wait_time//60}м) - ПРОПУСКАЕМ")
+        logger.error(f"💡 Медиа операции заблокированы на {wait_time//60} минут. Возобновите работу позже.")
+        
+        # Сохраняем состояние FloodWait для последующего возобновления
+        if message_id:
+            save_flood_wait_state(message_id, wait_time, f"Media Upload FloodWait - {context}")
+        
+        return False
 
 
 def save_last_message_id(message_id: int, filename: str = 'last_message_id.txt') -> None:
@@ -224,6 +304,76 @@ def save_last_message_id(message_id: int, filename: str = 'last_message_id.txt')
                 os.remove(f"{full_path}.tmp")
         except:
             pass
+
+def save_flood_wait_state(message_id: int, wait_time: int, reason: str) -> None:
+    """
+    Сохранение состояния при критическом FloodWait для последующего возобновления.
+    
+    Args:
+        message_id: ID сообщения, на котором произошел FloodWait
+        wait_time: Время ожидания в секундах
+        reason: Причина FloodWait
+    """
+    try:
+        data_dir = '/app/data' if os.path.exists('/app/data') else '.'
+        os.makedirs(data_dir, exist_ok=True)
+        
+        flood_state = {
+            'message_id': message_id,
+            'wait_time': wait_time,
+            'reason': reason,
+            'timestamp': time.time(),
+            'resume_after': time.time() + wait_time
+        }
+        
+        state_file = os.path.join(data_dir, 'flood_wait_state.json')
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(flood_state, f, indent=2)
+            
+        logging.getLogger('telegram_copier').warning(
+            f"💾 Сохранено состояние FloodWait: ID:{message_id}, ожидание:{wait_time}с, возобновить после: {time.strftime('%H:%M:%S', time.localtime(flood_state['resume_after']))}"
+        )
+            
+    except Exception as e:
+        logging.getLogger('telegram_copier').error(f"Ошибка сохранения состояния FloodWait: {e}")
+
+def load_flood_wait_state() -> Optional[dict]:
+    """
+    Загрузка состояния FloodWait для проверки возможности возобновления.
+    
+    Returns:
+        Словарь с состоянием FloodWait или None
+    """
+    try:
+        data_dir = '/app/data' if os.path.exists('/app/data') else '.'
+        state_file = os.path.join(data_dir, 'flood_wait_state.json')
+        
+        if not os.path.exists(state_file):
+            return None
+            
+        with open(state_file, 'r', encoding='utf-8') as f:
+            state = json.load(f)
+            
+        # Проверяем, не истекло ли время ожидания
+        current_time = time.time()
+        if current_time >= state.get('resume_after', 0):
+            # Время ожидания истекло, можно возобновлять
+            os.remove(state_file)  # Удаляем файл состояния
+            logging.getLogger('telegram_copier').info(
+                f"✅ FloodWait истек, можно возобновить с сообщения ID:{state.get('message_id')}"
+            )
+            return state
+        else:
+            # Все еще нужно ждать
+            remaining = int(state.get('resume_after', 0) - current_time)
+            logging.getLogger('telegram_copier').warning(
+                f"⏳ FloodWait активен, осталось ждать: {remaining}с ({remaining//60}м{remaining%60}с)"
+            )
+            return None
+            
+    except Exception as e:
+        logging.getLogger('telegram_copier').error(f"Ошибка загрузки состояния FloodWait: {e}")
+        return None
 
 
 def load_last_message_id(filename: str = 'last_message_id.txt') -> Optional[int]:

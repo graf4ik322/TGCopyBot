@@ -2,6 +2,51 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.3] - 2025-01-27
+
+### Critical FloodWait & Media Error Handling
+- **CRITICAL FIX**: Intelligent FloodWaitError handling for media upload operations
+  - **Root Cause**: Script failed on `UploadMediaRequest` FloodWait errors (440+ seconds) without proper retry
+  - **Error Details**: `A wait of 446 seconds is required (caused by UploadMediaRequest)`
+  - **Solution**: Implemented adaptive FloodWait strategies with smart retry mechanisms
+  - **Impact**: Bot now handles Telegram rate limits gracefully and resumes automatically
+  - **Technical Implementation**:
+    - Added `handle_media_flood_wait()` specialized for media upload operations
+    - Implemented tiered wait strategies: <30s wait, 30-120s wait, 120-600s wait with logging, >600s skip
+    - Added retry mechanism (3 attempts) with exponential backoff
+    - Created FloodWait state persistence for long delays
+    - Enhanced error context logging for better debugging
+
+### Enhanced Error Recovery System
+- **Smart Resume Mechanism**: Automatic recovery from critical FloodWait scenarios
+  - **State Persistence**: `flood_wait_state.json` tracks interrupted operations
+  - **Auto-Resume**: Checks FloodWait expiry on restart and resumes from correct message ID
+  - **Graceful Degradation**: Long waits (>10 min) are skipped with state saved for later resume
+- **Expired File Reference Handling**: Proper handling of unavailable media
+  - **Detection**: Identifies "file reference has expired" and "self-destructing media" errors
+  - **Graceful Fallback**: Continues processing without crashing when media is unavailable
+  - **Detailed Logging**: Clear error messages with message IDs for troubleshooting
+
+### Enhanced Debugging & Monitoring  
+- **Comprehensive Message ID Logging**: All operations now include message IDs for traceability
+  - **Album Processing**: Shows ID ranges `(ID: 12345-12348)` for album boundaries
+  - **Single Messages**: Clear `ID:12345` format in all log messages
+  - **Success/Failure Tracking**: Detailed logging with message IDs for post-mortem analysis
+- **FloodWait Progress Monitoring**: Real-time updates during long waits
+  - **Chunked Waiting**: Large waits broken into smaller chunks with progress updates
+  - **Time Estimates**: Clear remaining time formatting (Xm Ys)
+  - **Context Awareness**: Different strategies for media vs text operations
+
+### Technical Architecture Improvements
+- **Retry Logic**: Multi-level retry system for different error types
+  - **FloodWait**: Up to 3 retries with adaptive waiting
+  - **Media Errors**: Graceful fallback to text-only when media fails
+  - **Network Issues**: Proper error categorization and handling
+- **State Management**: Robust persistence for long-running operations
+  - **Atomic Saves**: Message ID progress saved after each successful operation
+  - **Recovery Points**: FloodWait state allows mid-operation resume
+  - **Clean Shutdown**: Proper state cleanup on normal completion
+
 ## [1.1.2] - 2025-01-27
 
 ### Critical Telethon API Fix - TLObject Compatibility  

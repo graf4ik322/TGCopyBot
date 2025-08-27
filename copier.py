@@ -23,8 +23,8 @@ from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
 from telethon.tl import functions
 # from telethon.tl.functions.channels import GetParticipantRequest - убрано, используем get_permissions
 from telethon.tl.functions.messages import GetHistoryRequest
-from utils import (RateLimiter, handle_flood_wait, save_last_message_id, ProgressTracker, 
-                   sanitize_filename, format_file_size, MessageDeduplicator, PerformanceMonitor)
+from utils import (RateLimiter, handle_flood_wait, handle_media_flood_wait, save_last_message_id, save_flood_wait_state, 
+                   load_flood_wait_state, ProgressTracker, sanitize_filename, format_file_size, MessageDeduplicator, PerformanceMonitor)
 from album_handler import AlbumHandler
 from message_tracker import MessageTracker
 
@@ -459,6 +459,15 @@ class TelegramCopier:
         else:
             self.logger.info("🔗 Режим с вложенностью: комментарии сохранят связь с основными постами")
         
+        # НОВОЕ: Проверяем состояние FloodWait при запуске
+        flood_state = load_flood_wait_state()
+        if flood_state:
+            # Было прерывание из-за FloodWait, проверяем можно ли возобновить
+            flood_resume_id = flood_state.get('message_id')
+            if flood_resume_id and not resume_from_id:
+                resume_from_id = flood_resume_id
+                self.logger.warning(f"🔄 Возобновление после FloodWait с сообщения ID:{flood_resume_id}")
+
         # Определяем начальную позицию
         if self.message_tracker and not resume_from_id:
             # Используем трекер для определения последнего ID
@@ -668,9 +677,10 @@ class TelegramCopier:
                         album_messages = grouped_messages[grouped_id]
                         album_messages.sort(key=lambda x: x.id)  # Сортируем по ID для правильного порядка
                         
-                        # Логируем тип альбома
+                        # Логируем тип альбома с ID сообщений
                         album_type = "в комментарии" if is_comment else "основной"
-                        self.logger.info(f"🎬 Обрабатываем альбом {grouped_id} ({album_type}) из {len(album_messages)} сообщений")
+                        album_ids = [msg.id for msg in album_messages]
+                        self.logger.info(f"🎬 Обрабатываем альбом {grouped_id} ({album_type}) из {len(album_messages)} сообщений (ID: {album_ids[0]}-{album_ids[-1]})")
                         
                         # Вычисляем общий размер альбома для мониторинга
                         total_size = 0
@@ -692,16 +702,18 @@ class TelegramCopier:
                         if success:
                             self.copied_messages += len(album_messages)
                             album_status = "✅ успешно скопирован" if not is_comment else "✅ успешно скопирован (комментарий)"
-                            self.logger.info(f"{album_status}: альбом {grouped_id}")
+                            album_ids = [msg.id for msg in album_messages]
+                            self.logger.info(f"{album_status}: альбом {grouped_id} (ID: {album_ids[0]}-{album_ids[-1]})")
                             
                             # Записываем ID последнего сообщения альбома
                             last_album_message_id = max(msg.id for msg in album_messages)
                             save_last_message_id(last_album_message_id, self.resume_file)
-                            self.logger.debug(f"Записан ID {last_album_message_id} после успешного копирования альбома")
+                            self.logger.debug(f"💾 Записан последний ID: {last_album_message_id} после успешного копирования альбома")
                         else:
                             self.failed_messages += len(album_messages)
                             album_status = "❌ не удалось скопировать" if not is_comment else "❌ не удалось скопировать (комментарий)"
-                            self.logger.warning(f"{album_status}: альбом {grouped_id}")
+                            album_ids = [msg.id for msg in album_messages]
+                            self.logger.warning(f"{album_status}: альбом {grouped_id} (ID: {album_ids[0]}-{album_ids[-1]})")
                         
                         # Помечаем альбом как обработанный
                         processed_albums.add(grouped_id)
@@ -721,13 +733,13 @@ class TelegramCopier:
                         elif message.message:
                             message_size = len(message.message.encode('utf-8'))
                         
-                        # Логируем тип сообщения
+                        # Логируем тип сообщения с подробным контекстом
                         message_type = "💬 комментарий" if is_comment else "📌 пост"
                         if not self.flatten_structure and is_comment:
                             # В режиме с вложенностью можно добавить специальную обработку
-                            self.logger.debug(f"Обрабатываем {message_type} {message.id} (связан с {message.reply_to})")
+                            self.logger.info(f"📝 Обрабатываем {message_type} ID:{message.id} (связан с {getattr(message.reply_to, 'reply_to_msg_id', 'N/A')})")
                         else:
-                            self.logger.debug(f"Обрабатываем {message_type} {message.id}")
+                            self.logger.info(f"📝 Обрабатываем {message_type} ID:{message.id}")
                         
                         # Копируем сообщение
                         success = await self.copy_single_message(message)
@@ -739,13 +751,13 @@ class TelegramCopier:
                         if success:
                             self.copied_messages += 1
                             success_status = "✅ успешно скопировано" if not is_comment else "✅ успешно скопировано (комментарий)"
-                            self.logger.debug(f"{success_status}: сообщение {message.id}")
+                            self.logger.info(f"{success_status}: сообщение ID:{message.id}")
                             save_last_message_id(message.id, self.resume_file)
-                            self.logger.debug(f"Записан ID {message.id} после успешного копирования")
+                            self.logger.debug(f"💾 Записан последний ID: {message.id} после успешного копирования")
                         else:
                             self.failed_messages += 1
                             fail_status = "❌ не удалось скопировать" if not is_comment else "❌ не удалось скопировать (комментарий)"
-                            self.logger.warning(f"{fail_status}: сообщение {message.id}")
+                            self.logger.warning(f"{fail_status}: сообщение ID:{message.id}")
                         
                         # Соблюдаем лимиты скорости
                         if not self.dry_run:
@@ -1004,7 +1016,7 @@ class TelegramCopier:
                 if message.media:
                     try:
                         # Скачиваем медиа файл в память
-                        self.logger.debug(f"Скачиваем медиа файл {i+1}/{len(album_messages)} из сообщения {message.id}")
+                        self.logger.debug(f"📥 Скачиваем медиа файл {i+1}/{len(album_messages)} из сообщения ID:{message.id}")
                         
                         # ИСПРАВЛЕНИЕ: Получаем оригинальное имя файла и расширение
                         file_name = self._get_media_filename(message.media, i)
@@ -1019,15 +1031,22 @@ class TelegramCopier:
                                 'filename': file_name,
                                 'media_type': type(message.media).__name__,
                                 'is_photo': isinstance(message.media, MessageMediaPhoto),
-                                'original_media': message.media
+                                'original_media': message.media,
+                                'message_id': message.id  # Добавляем ID для логирования
                             }
                             downloaded_files.append(media_info)
-                            self.logger.debug(f"Успешно скачан файл {i+1}: {len(file_bytes)} байт, имя: {file_name}")
+                            self.logger.debug(f"✅ Успешно скачан файл {i+1}: {len(file_bytes)} байт, имя: {file_name} (ID:{message.id})")
                         else:
-                            self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}")
+                            self.logger.warning(f"❌ Не удалось скачать медиа из сообщения ID:{message.id}")
                             
                     except Exception as download_error:
-                        self.logger.warning(f"Ошибка скачивания медиа из сообщения {message.id}: {download_error}")
+                        # Обработка специфичных ошибок скачивания
+                        if "file reference has expired" in str(download_error):
+                            self.logger.warning(f"📅 Файл ссылка истекла для сообщения ID:{message.id} - файл устарел или самоуничтожающийся")
+                        elif "self-destructing media" in str(download_error):
+                            self.logger.warning(f"💥 Самоуничтожающееся медиа в сообщении ID:{message.id} - нельзя переслать")
+                        else:
+                            self.logger.warning(f"❌ Ошибка скачивания медиа из сообщения ID:{message.id}: {download_error}")
                         continue
             
             # Проверяем результат скачивания
@@ -1078,27 +1097,57 @@ class TelegramCopier:
             for i, media_info in enumerate(downloaded_files):
                 self.logger.debug(f"  Файл {i+1}: {len(media_info['bytes'])} байт, имя: {media_info['filename']}, тип: {media_info['media_type']}")
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанные файлы как BytesIO объекты
-            sent_messages = await self.client.send_file(**send_kwargs)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанные файлы как BytesIO объекты с умной обработкой FloodWait
+            max_retries = 3
+            retry_count = 0
             
-            # Анализируем результат
-            if isinstance(sent_messages, list):
-                self.logger.info(f"✅ Альбом успешно отправлен как {len(sent_messages)} сообщений")
-                
-                # Обновляем трекер
-                if self.message_tracker and sent_messages:
-                    source_ids = [msg.id for msg in album_messages]
-                    target_ids = [msg.id for msg in sent_messages]
-                    self.message_tracker.mark_album_copied(source_ids, target_ids)
-            else:
-                self.logger.warning(f"⚠️ Альбом отправлен как одно сообщение {sent_messages.id}")
-                
-                if self.message_tracker:
-                    source_ids = [msg.id for msg in album_messages]
-                    target_ids = [sent_messages.id]
-                    self.message_tracker.mark_album_copied(source_ids, target_ids)
+            while retry_count < max_retries:
+                try:
+                    sent_messages = await self.client.send_file(**send_kwargs)
+                    
+                    # Анализируем результат
+                    if isinstance(sent_messages, list):
+                        self.logger.info(f"✅ Альбом успешно отправлен как {len(sent_messages)} сообщений (ID: {[msg.id for msg in album_messages]})")
+                        
+                        # Обновляем трекер
+                        if self.message_tracker and sent_messages:
+                            source_ids = [msg.id for msg in album_messages]
+                            target_ids = [msg.id for msg in sent_messages]
+                            self.message_tracker.mark_album_copied(source_ids, target_ids)
+                    else:
+                        self.logger.warning(f"⚠️ Альбом отправлен как одно сообщение {sent_messages.id} (ID: {[msg.id for msg in album_messages]})")
+                        
+                        if self.message_tracker:
+                            source_ids = [msg.id for msg in album_messages]
+                            target_ids = [sent_messages.id]
+                            self.message_tracker.mark_album_copied(source_ids, target_ids)
+                    
+                    return True
+                    
+                except FloodWaitError as flood_error:
+                    retry_count += 1
+                    album_ids = [msg.id for msg in album_messages]
+                    should_retry = await handle_media_flood_wait(
+                        flood_error, 
+                        self.logger, 
+                        f"Album {album_ids[0]}-{album_ids[-1]}"
+                    )
+                    
+                    if not should_retry:
+                        self.logger.error(f"🚫 Пропускаем альбом {album_ids} из-за долгого FloodWait")
+                        return False
+                    
+                    if retry_count >= max_retries:
+                        self.logger.error(f"❌ Исчерпаны попытки отправки альбома {album_ids} после {max_retries} попыток FloodWait")
+                        return False
+                        
+                    self.logger.info(f"🔄 Повторная попытка отправки альбома {album_ids} ({retry_count}/{max_retries})")
+                    
+                except Exception as send_error:
+                    self.logger.error(f"❌ Неожиданная ошибка отправки альбома: {send_error}")
+                    return False
             
-            return True
+            return False
             
         except MediaInvalidError as e:
             self.logger.warning(f"Медиа альбома недоступно: {e}")
@@ -1175,16 +1224,26 @@ class TelegramCopier:
                         sent_message = await self.client.send_message(**send_kwargs)
                     else:
                         # Для всех других типов медиа - скачиваем и загружаем заново
-                        self.logger.debug(f"Скачиваем медиа из сообщения {message.id}")
+                        self.logger.debug(f"📥 Скачиваем медиа из сообщения ID:{message.id}")
                         
                         # ИСПРАВЛЕНИЕ: Получаем имя файла и тип медиа
                         file_name = self._get_media_filename(message.media, 0)
                         
                         # Скачиваем медиа файл в память
-                        file_bytes = await self.client.download_media(message.media, file=bytes)
+                        try:
+                            file_bytes = await self.client.download_media(message.media, file=bytes)
+                        except Exception as download_error:
+                            if "file reference has expired" in str(download_error):
+                                self.logger.warning(f"📅 Файл ссылка истекла для сообщения ID:{message.id} - пропускаем")
+                                return False
+                            elif "self-destructing media" in str(download_error):
+                                self.logger.warning(f"💥 Самоуничтожающееся медиа в сообщении ID:{message.id} - пропускаем")
+                                return False
+                            else:
+                                raise download_error
                         
                         if file_bytes:
-                            self.logger.debug(f"Успешно скачан файл: {len(file_bytes)} байт, имя: {file_name}")
+                            self.logger.debug(f"✅ Успешно скачан файл: {len(file_bytes)} байт, имя: {file_name} (ID:{message.id})")
                             
                             # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем BytesIO объект с именем файла
                             file_obj = io.BytesIO(file_bytes)
@@ -1204,8 +1263,34 @@ class TelegramCopier:
                             
                             if message.entities:
                                 file_kwargs['formatting_entities'] = message.entities
-                                
-                            sent_message = await self.client.send_file(**file_kwargs)
+                            
+                            # Отправляем с умной обработкой FloodWait
+                            max_retries = 3
+                            retry_count = 0
+                            
+                            while retry_count < max_retries:
+                                try:
+                                    sent_message = await self.client.send_file(**file_kwargs)
+                                    self.logger.debug(f"✅ Медиа сообщение ID:{message.id} успешно отправлено")
+                                    break
+                                    
+                                except FloodWaitError as flood_error:
+                                    retry_count += 1
+                                    should_retry = await handle_media_flood_wait(flood_error, self.logger, message.id)
+                                    
+                                    if not should_retry:
+                                        self.logger.error(f"🚫 Пропускаем сообщение ID:{message.id} из-за долгого FloodWait")
+                                        return False
+                                    
+                                    if retry_count >= max_retries:
+                                        self.logger.error(f"❌ Исчерпаны попытки отправки сообщения ID:{message.id} после {max_retries} попыток FloodWait")
+                                        return False
+                                        
+                                    self.logger.info(f"🔄 Повторная попытка отправки сообщения ID:{message.id} ({retry_count}/{max_retries})")
+                                    
+                                except Exception as send_error:
+                                    self.logger.error(f"❌ Неожиданная ошибка отправки сообщения ID:{message.id}: {send_error}")
+                                    return False
                         else:
                             # Если не удалось скачать медиа, отправляем только текст
                             self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}, отправляем только текст")
