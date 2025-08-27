@@ -106,6 +106,7 @@ class AlbumHandler:
             album_messages.sort(key=lambda x: x.id)
             
             # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа файлы для избежания ошибки "protected chat"
+            # УЛУЧШЕНИЕ: Сохраняем информацию о типе медиа и имени файла
             downloaded_files = []
             first_message = album_messages[0]
             
@@ -115,11 +116,22 @@ class AlbumHandler:
                         # Скачиваем медиа файл в память
                         self.logger.debug(f"Скачиваем медиа файл {i+1}/{len(album_messages)} из сообщения {message.id}")
                         
+                        # ИСПРАВЛЕНИЕ: Получаем оригинальное имя файла и расширение
+                        file_name = self._get_media_filename(message.media, i)
+                        
                         file_bytes = await self.client.download_media(message.media, file=bytes)
                         
                         if file_bytes:
-                            downloaded_files.append(file_bytes)
-                            self.logger.debug(f"Успешно скачан файл {i+1}: {len(file_bytes)} байт")
+                            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем объект с сохранением типа медиа
+                            media_info = {
+                                'bytes': file_bytes,
+                                'filename': file_name,
+                                'media_type': type(message.media).__name__,
+                                'is_photo': isinstance(message.media, MessageMediaPhoto),
+                                'original_media': message.media
+                            }
+                            downloaded_files.append(media_info)
+                            self.logger.debug(f"Успешно скачан файл {i+1}: {len(file_bytes)} байт, имя: {file_name}")
                         else:
                             self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}")
                             
@@ -137,16 +149,32 @@ class AlbumHandler:
             # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
             caption, entities = self.extract_album_text(album_messages)
             
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Подготавливаем файлы с правильными именами и типами
+            files_to_send = []
+            for media_info in downloaded_files:
+                files_to_send.append((media_info['bytes'], media_info['filename']))
+            
             # Подготавливаем параметры отправки со скачанными файлами
             send_kwargs = {
                 'entity': target_entity,
-                'file': downloaded_files,  # Используем скачанные байты
+                'file': files_to_send,  # Используем (bytes, filename) кортежи
                 'caption': caption,
             }
+            
+            # Для альбомов фотографий НЕ используем force_document
+            has_only_photos = all(media_info['is_photo'] for media_info in downloaded_files)
+            if not has_only_photos:
+                # Если есть документы/видео, то отправляем как документы
+                send_kwargs['force_document'] = True
             
             # ВАЖНО: Сохраняем форматирование текста
             if entities:
                 send_kwargs['formatting_entities'] = entities
+            
+            # ОТЛАДКА: Информация о файлах в альбоме
+            self.logger.info(f"Отправляем альбом из {len(downloaded_files)} медиа файлов (только фото: {has_only_photos})")
+            for i, media_info in enumerate(downloaded_files):
+                self.logger.debug(f"  Файл {i+1}: {len(media_info['bytes'])} байт, имя: {media_info['filename']}, тип: {media_info['media_type']}")
             
             # Отправляем как группированные медиа
             sent_messages = await self.client.send_file(**send_kwargs)
@@ -182,13 +210,16 @@ class AlbumHandler:
                     # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа для избежания ошибки "protected chat"
                     self.logger.debug(f"Скачиваем медиа из сообщения {message.id}")
                     
+                    # ИСПРАВЛЕНИЕ: Получаем имя файла и тип медиа
+                    file_name = self._get_media_filename(message.media, 0)
+                    
                     file_bytes = await self.client.download_media(message.media, file=bytes)
                     
                     if file_bytes:
-                        # Отправляем скачанный медиа файл с подписью
+                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанный медиа файл с именем и подписью
                         file_kwargs = {
                             'entity': target_entity,
-                            'file': file_bytes,  # Используем скачанные байты
+                            'file': (file_bytes, file_name),  # Передаем кортеж (bytes, filename)
                             'caption': text
                         }
                         
@@ -198,6 +229,8 @@ class AlbumHandler:
                         # Определяем тип медиа для правильной отправки
                         if isinstance(message.media, MessageMediaDocument):
                             file_kwargs['force_document'] = True
+                        elif isinstance(message.media, MessageMediaPhoto):
+                            file_kwargs['force_document'] = False
                         
                         await self.client.send_file(**file_kwargs)
                     else:
@@ -266,6 +299,53 @@ class AlbumHandler:
         # Если текст не найден ни в одном сообщении
         self.logger.debug("Текст не найден ни в одном сообщении альбома")
         return "", None
+
+    def _get_media_filename(self, media, index: int = 0) -> str:
+        """
+        Получение имени файла для медиа объекта с правильным расширением.
+        
+        Args:
+            media: Медиа объект Telegram
+            index: Индекс файла для уникальности имени
+            
+        Returns:
+            Имя файла с расширением
+        """
+        try:
+            if isinstance(media, MessageMediaPhoto):
+                # Для фотографий используем jpg расширение
+                return f"photo_{index + 1}.jpg"
+            elif isinstance(media, MessageMediaDocument) and media.document:
+                # Пытаемся получить оригинальное имя файла
+                document = media.document
+                
+                # Ищем атрибут с именем файла
+                if hasattr(document, 'attributes') and document.attributes:
+                    for attr in document.attributes:
+                        if hasattr(attr, 'file_name') and attr.file_name:
+                            return attr.file_name
+                
+                # Если имя не найдено, определяем по MIME типу
+                mime_type = getattr(document, 'mime_type', '')
+                if 'image' in mime_type:
+                    extension = mime_type.split('/')[-1] if '/' in mime_type else 'jpg'
+                    return f"image_{index + 1}.{extension}"
+                elif 'video' in mime_type:
+                    extension = mime_type.split('/')[-1] if '/' in mime_type else 'mp4'
+                    return f"video_{index + 1}.{extension}"
+                elif 'audio' in mime_type:
+                    extension = mime_type.split('/')[-1] if '/' in mime_type else 'mp3'
+                    return f"audio_{index + 1}.{extension}"
+                else:
+                    # Общий случай для документов
+                    return f"document_{index + 1}.bin"
+            else:
+                # Для неизвестных типов
+                return f"media_{index + 1}.bin"
+                
+        except Exception as e:
+            self.logger.warning(f"Ошибка определения имени файла: {e}")
+            return f"media_{index + 1}.bin"
 
     def get_album_stats(self) -> Dict[str, int]:
         """

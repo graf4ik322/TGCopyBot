@@ -2,6 +2,32 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.1] - 2025-01-27
+
+### Critical Media Type Fix - Photo and Album Display
+- **CRITICAL FIX**: Resolved photos appearing as "unnamed" files instead of proper images/albums
+  - **Root Cause**: After fixing protected chat forwarding, media files lost type information and filenames
+  - **Error Details**: Photos displayed as generic files with no extension, albums broken into separate unnamed files
+  - **Solution**: Enhanced media processing to preserve file types, names, and display modes
+  - **Impact**: Photos now display correctly as images, albums maintain proper grouping
+  - **Technical Implementation**:
+    - Added `_get_media_filename()` method to extract proper filenames and extensions
+    - Enhanced media download to preserve metadata (filename, type, is_photo flag)
+    - Updated `send_file()` calls to use `(bytes, filename)` tuples instead of raw bytes
+    - Implemented proper `force_document` logic: photos as images, documents as files
+    - Fixed album grouping to maintain photo album appearance vs document collections
+
+### Enhanced Media Processing Architecture
+- **Filename Detection**: Smart filename extraction from media objects
+  - **Photos**: Automatic `.jpg` extension with indexed naming (`photo_1.jpg`)
+  - **Documents**: Original filename preservation from Telegram attributes
+  - **MIME Type Fallback**: Extension detection from MIME types for unnamed files
+  - **Video/Audio**: Proper extensions (`.mp4`, `.mp3`) based on content type
+- **Media Type Preservation**: Maintains distinction between photos and documents
+  - **Photo Albums**: Display as image collections (no force_document)
+  - **Mixed Albums**: Smart handling of photo+document combinations
+  - **Single Images**: Proper photo display without document wrapper
+
 ## [1.1.0] - 2025-01-27
 
 ### Critical Bug Fix - Protected Chat Support
