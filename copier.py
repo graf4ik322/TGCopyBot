@@ -1127,15 +1127,12 @@ class TelegramCopier:
                 except FloodWaitError as flood_error:
                     retry_count += 1
                     album_ids = [msg.id for msg in album_messages]
-                    should_retry = await handle_media_flood_wait(
+                    await handle_media_flood_wait(
                         flood_error, 
                         self.logger, 
                         f"Album {album_ids[0]}-{album_ids[-1]}"
                     )
-                    
-                    if not should_retry:
-                        self.logger.error(f"🚫 Пропускаем альбом {album_ids} из-за долгого FloodWait")
-                        return False
+                    # Продолжаем попытку - FloodWait завершен
                     
                     if retry_count >= max_retries:
                         self.logger.error(f"❌ Исчерпаны попытки отправки альбома {album_ids} после {max_retries} попыток FloodWait")
@@ -1276,11 +1273,8 @@ class TelegramCopier:
                                     
                                 except FloodWaitError as flood_error:
                                     retry_count += 1
-                                    should_retry = await handle_media_flood_wait(flood_error, self.logger, message.id)
-                                    
-                                    if not should_retry:
-                                        self.logger.error(f"🚫 Пропускаем сообщение ID:{message.id} из-за долгого FloodWait")
-                                        return False
+                                    await handle_media_flood_wait(flood_error, self.logger, message.id)
+                                    # Продолжаем попытку - FloodWait завершен
                                     
                                     if retry_count >= max_retries:
                                         self.logger.error(f"❌ Исчерпаны попытки отправки сообщения ID:{message.id} после {max_retries} попыток FloodWait")

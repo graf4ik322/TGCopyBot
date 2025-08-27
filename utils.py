@@ -177,7 +177,8 @@ class RateLimiter:
 
 async def handle_flood_wait(error: FloodWaitError, logger: logging.Logger, context: str = "") -> bool:
     """
-    Интеллектуальная обработка ошибки FloodWaitError с адаптивными стратегиями.
+    ИСПРАВЛЕНО: Правильная обработка ошибки FloodWaitError с обязательным ожиданием.
+    КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Теперь ВСЕГДА ждет окончания FloodWait для сохранения хронологии.
     
     Args:
         error: Ошибка FloodWaitError от Telegram API
@@ -185,7 +186,7 @@ async def handle_flood_wait(error: FloodWaitError, logger: logging.Logger, conte
         context: Контекст операции для лучшего логирования
     
     Returns:
-        True если стоит повторить операцию, False если следует пропустить
+        True - всегда, так как мы всегда ждем окончания FloodWait
     """
     wait_time = error.seconds
     
@@ -214,14 +215,37 @@ async def handle_flood_wait(error: FloodWaitError, logger: logging.Logger, conte
                 logger.info(f"⏳ FloodWait ({context}): осталось {remaining}с ({remaining//60}м{remaining%60}с)")
         return True
     else:
-        # Очень длительное ожидание (>5 минут) - пропускаем с возможностью повтора позже
-        logger.error(f"🚫 FloodWait ({context}): слишком долгое ожидание {wait_time}с ({wait_time//60}м) - ПРОПУСКАЕМ")
-        logger.error(f"💡 Рекомендуется возобновить работу через {wait_time//60} минут")
-        return False
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Даже очень долгие FloodWait мы ЖДЕМ
+        logger.warning(f"⏳ FloodWait ({context}): очень долгое ожидание {wait_time}с ({wait_time//60}м) - ОБЯЗАТЕЛЬНО ЖДЕМ")
+        logger.warning(f"🔄 FloodWait действует на весь аккаунт, пропуск сообщений нарушает хронологию")
+        logger.warning(f"📊 Дожидаемся окончания FloodWait для продолжения работы...")
+        
+        # Ждем с промежуточными сообщениями каждые 2 минуты
+        elapsed = 0
+        while elapsed < wait_time:
+            sleep_chunk = min(120, wait_time - elapsed)  # Проверяем каждые 2 минуты
+            await asyncio.sleep(sleep_chunk)
+            elapsed += sleep_chunk
+            if elapsed < wait_time:
+                remaining = wait_time - elapsed
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                seconds = remaining % 60
+                if hours > 0:
+                    time_str = f"{hours}ч{minutes}м{seconds}с"
+                elif minutes > 0:
+                    time_str = f"{minutes}м{seconds}с"
+                else:
+                    time_str = f"{seconds}с"
+                logger.info(f"⏳ FloodWait ({context}): осталось {time_str} ({remaining}с)")
+        
+        logger.info(f"✅ FloodWait ({context}) завершен, продолжаем работу")
+        return True
 
 async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger, message_id: int = None) -> bool:
     """
-    Специализированная обработка FloodWaitError для медиа операций.
+    ИСПРАВЛЕНО: Правильная обработка FloodWaitError для медиа операций.
+    КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Теперь ВСЕГДА ждет окончания FloodWait, никогда не пропускает сообщения.
     
     Args:
         error: Ошибка FloodWaitError от Telegram API  
@@ -229,20 +253,21 @@ async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger,
         message_id: ID сообщения для контекста
         
     Returns:
-        True если стоит повторить операцию, False если следует пропустить
+        True - всегда, так как мы всегда ждем окончания FloodWait
     """
     wait_time = error.seconds
     context = f"Media Upload (msg {message_id})" if message_id else "Media Upload"
     
-    # Для медиа операций более строгие лимиты
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Убираем логику пропуска сообщений
+    # FloodWait действует на весь аккаунт, поэтому пропуск не решает проблему
+    # Мы ДОЛЖНЫ дождаться окончания FloodWait чтобы сохранить хронологию
+    
     if wait_time <= 30:
         logger.warning(f"📸 Media FloodWait: ожидание {wait_time}с - ЖДЕМ")
         await asyncio.sleep(wait_time + 1)  # +1 секунда для безопасности
-        return True
     elif wait_time <= 120:  # 2 минуты
         logger.warning(f"📸 Media FloodWait: ожидание {wait_time}с ({wait_time//60}м{wait_time%60}с) - ЖДЕМ")
         await asyncio.sleep(wait_time + 2)  # +2 секунды для безопасности
-        return True
     elif wait_time <= 600:  # 10 минут
         logger.warning(f"📸 Media FloodWait: долгое ожидание {wait_time}с ({wait_time//60}м) - ЖДЕМ с паузами")
         # Ждем с промежуточными сообщениями
@@ -255,17 +280,41 @@ async def handle_media_flood_wait(error: FloodWaitError, logger: logging.Logger,
                 remaining = wait_time - elapsed
                 logger.info(f"📸 Media FloodWait: осталось {remaining}с ({remaining//60}м)")
         await asyncio.sleep(3)  # Дополнительная пауза для безопасности
-        return True
     else:
-        # Более 10 минут - пропускаем и сохраняем состояние
-        logger.error(f"🚫 Media FloodWait: критически долгое ожидание {wait_time}с ({wait_time//60}м) - ПРОПУСКАЕМ")
-        logger.error(f"💡 Медиа операции заблокированы на {wait_time//60} минут. Возобновите работу позже.")
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Даже очень долгие FloodWait мы ЖДЕМ, а не пропускаем
+        logger.warning(f"⏳ Media FloodWait: очень долгое ожидание {wait_time}с ({wait_time//60}м) - ОБЯЗАТЕЛЬНО ЖДЕМ")
+        logger.warning(f"🔄 FloodWait действует на весь аккаунт, поэтому пропуск сообщения не поможет")
+        logger.warning(f"📊 Для сохранения хронологии дожидаемся окончания FloodWait...")
         
-        # Сохраняем состояние FloodWait для последующего возобновления
+        # Сохраняем состояние для информации, но НЕ завершаем процесс
         if message_id:
             save_flood_wait_state(message_id, wait_time, f"Media Upload FloodWait - {context}")
         
-        return False
+        # Ждем с промежуточными сообщениями каждые 2 минуты
+        elapsed = 0
+        while elapsed < wait_time:
+            sleep_chunk = min(120, wait_time - elapsed)  # Проверяем каждые 2 минуты
+            await asyncio.sleep(sleep_chunk)
+            elapsed += sleep_chunk
+            if elapsed < wait_time:
+                remaining = wait_time - elapsed
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                seconds = remaining % 60
+                if hours > 0:
+                    time_str = f"{hours}ч{minutes}м{seconds}с"
+                elif minutes > 0:
+                    time_str = f"{minutes}м{seconds}с"
+                else:
+                    time_str = f"{seconds}с"
+                logger.info(f"⏳ Media FloodWait: осталось {time_str} ({remaining}с)")
+        
+        # Дополнительная пауза для безопасности
+        await asyncio.sleep(5)
+        logger.info(f"✅ Media FloodWait завершен, продолжаем с сообщения {message_id}")
+    
+    # ВСЕГДА возвращаем True - мы дождались окончания FloodWait
+    return True
 
 
 def save_last_message_id(message_id: int, filename: str = 'last_message_id.txt') -> None:

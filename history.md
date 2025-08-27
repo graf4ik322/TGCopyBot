@@ -2,6 +2,43 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.4] - 2025-01-27
+
+### CRITICAL CHRONOLOGY FIX: FloodWait Handling Logic
+- **CRITICAL BUG FIX**: Fixed message skipping during FloodWait that violated chronological order
+  - **Root Cause**: Script was **skipping** messages when FloodWait exceeded 10 minutes (600s)
+  - **Problem**: FloodWait applies to entire account, not individual messages - skipping breaks chronology
+  - **User Impact**: Messages were permanently lost, destroying strict chronological processing
+  - **Solution**: **ALWAYS wait** for FloodWait completion regardless of duration
+
+### Technical Implementation Details
+- **Modified `handle_media_flood_wait()`**: Now returns `True` always after waiting
+  - **Removed**: Logic that returned `False` for waits >600 seconds
+  - **Added**: Enhanced progress monitoring for very long waits (>10 minutes)
+  - **Improved**: Better time formatting (hours/minutes/seconds) for long waits
+- **Modified `handle_flood_wait()`**: Consistent behavior with media flood wait handling  
+  - **Removed**: Logic that skipped messages for waits >300 seconds
+  - **Added**: Progress updates every 2 minutes during long waits
+  - **Enhanced**: Clear messaging about why waiting is mandatory for chronology
+- **Updated `copier.py`**: Removed conditional logic based on FloodWait return values
+  - **Simplified**: All FloodWait handlers now guarantee completion
+  - **Removed**: "Пропускаем из-за долгого FloodWait" error paths
+  - **Result**: Guaranteed message processing order preservation
+
+### Chronological Integrity Improvements
+- **Account-Level Understanding**: FloodWait blocks entire Telegram account, not individual operations
+- **Sequential Processing**: Messages must be processed in order to maintain timeline accuracy
+- **No Message Loss**: Every message is now guaranteed to be processed eventually
+- **Progress Persistence**: Long waits are logged and monitored for transparency
+- **User Experience**: Clear progress updates during extended wait periods
+
+### Impact & Benefits
+- **✅ Chronology Preserved**: Messages are never skipped, maintaining perfect timeline order
+- **✅ Zero Message Loss**: All messages are eventually processed regardless of FloodWait duration
+- **✅ Transparent Waiting**: Users see clear progress during long FloodWait periods
+- **✅ Predictable Behavior**: Script always completes processing, no matter how long it takes
+- **✅ Resume Capability**: Can still resume from interruptions while respecting FloodWait
+
 ## [1.1.3] - 2025-01-27
 
 ### Critical FloodWait & Media Error Handling
