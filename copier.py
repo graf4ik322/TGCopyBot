@@ -914,7 +914,7 @@ class TelegramCopier:
     async def copy_album(self, album_messages: List[Message]) -> bool:
         """
         Копирование альбома сообщений как единого целое.
-        УПРОЩЕННАЯ ВЕРСИЯ: Все альбомы обрабатываются одинаково.
+        КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Теперь скачивает медиа для избежания ошибки "protected chat".
         
         Args:
             album_messages: Список сообщений альбома (отсортированный по ID)
@@ -946,19 +946,32 @@ class TelegramCopier:
             
             self.logger.info(f"Альбом содержит сообщения из discussion group: {has_discussion_messages}")
             
-            # ВОЗВРАТ К ПРОСТОЙ ЛОГИКЕ: Комментарии = обычные посты
-            # Используем стандартную обработку медиа без специальных случаев
-            media_files = []
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа файлы вместо пересылки объектов
+            # Это решает проблему "You can't forward messages from a protected chat"
+            downloaded_files = []
             
-            for message in album_messages:
+            for i, message in enumerate(album_messages):
                 if message.media:
-                    # Добавляем ВСЕ медиа файлы включая HTML
-                    media_files.append(message.media)
-                    self.logger.debug(f"Добавлен медиа объект {message.id}")
+                    try:
+                        # Скачиваем медиа файл в память
+                        self.logger.debug(f"Скачиваем медиа файл {i+1}/{len(album_messages)} из сообщения {message.id}")
+                        
+                        # Используем download_media для получения байтов файла
+                        file_bytes = await self.client.download_media(message.media, file=bytes)
+                        
+                        if file_bytes:
+                            downloaded_files.append(file_bytes)
+                            self.logger.debug(f"Успешно скачан файл {i+1}: {len(file_bytes)} байт")
+                        else:
+                            self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}")
+                            
+                    except Exception as download_error:
+                        self.logger.warning(f"Ошибка скачивания медиа из сообщения {message.id}: {download_error}")
+                        continue
             
-            # Проверяем результат
-            if not media_files:
-                self.logger.warning("Альбом не содержит медиа файлов")
+            # Проверяем результат скачивания
+            if not downloaded_files:
+                self.logger.warning("Не удалось скачать медиа файлы альбома")
                 # ИСПРАВЛЕНО: Ищем текст в любом сообщении альбома
                 album_text, _ = self.extract_album_text(album_messages)
                 if album_text:
@@ -974,10 +987,10 @@ class TelegramCopier:
             # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
             caption, entities = self.extract_album_text(album_messages)
             
-            # Подготавливаем параметры для отправки альбома
+            # Подготавливаем параметры для отправки альбома с скачанными файлами
             send_kwargs = {
                 'entity': self.target_entity,
-                'file': media_files,  # Теперь все медиа объекты одного типа
+                'file': downloaded_files,  # Используем скачанные байты вместо медиа объектов
                 'caption': caption,
             }
             
@@ -986,11 +999,11 @@ class TelegramCopier:
                 send_kwargs['formatting_entities'] = entities
             
             # ОТЛАДКА: Информация о файлах в альбоме
-            self.logger.info(f"Отправляем альбом из {len(media_files)} медиа файлов")
-            for i, media in enumerate(media_files):
-                self.logger.debug(f"  Файл {i+1}: медиа объект {type(media)}")
+            self.logger.info(f"Отправляем альбом из {len(downloaded_files)} медиа файлов")
+            for i, file_bytes in enumerate(downloaded_files):
+                self.logger.debug(f"  Файл {i+1}: {len(file_bytes)} байт")
             
-            # ВОЗВРАТ К СТАНДАРТНОЙ ОТПРАВКЕ АЛЬБОМОВ
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанные файлы (не медиа объекты)
             sent_messages = await self.client.send_file(**send_kwargs)
             
             # Анализируем результат
@@ -1079,52 +1092,52 @@ class TelegramCopier:
             if message.entities:
                 send_kwargs['formatting_entities'] = message.entities
             
-            # Обрабатываем медиа - ВСЕ СООБЩЕНИЯ ОДИНАКОВО
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа для избежания ошибки "protected chat"
             if message.media:
-                if isinstance(message.media, MessageMediaPhoto):
-                    # Для фотографий - стандартная обработка
-                    file_kwargs = {
-                        'entity': self.target_entity,
-                        'file': message.media,
-                        'caption': text,
-                        'force_document': False
-                    }
-                    
-                    if message.entities:
-                        file_kwargs['formatting_entities'] = message.entities
-                    sent_message = await self.client.send_file(**file_kwargs)
-                    
-                elif isinstance(message.media, MessageMediaDocument):
-                    # Для документов/видео/аудио - обрабатываем ВСЕ файлы включая HTML
-                    file_kwargs = {
-                        'entity': self.target_entity,
-                        'file': message.media,
-                        'caption': text,
-                        'force_document': True
-                    }
-                    
-                    if message.entities:
-                        file_kwargs['formatting_entities'] = message.entities
-                    sent_message = await self.client.send_file(**file_kwargs)
-                elif isinstance(message.media, MessageMediaWebPage):
-                    # Для веб-страниц отправляем только текст с entities
-                    sent_message = await self.client.send_message(**send_kwargs)
-                else:
-                    # Для других типов медиа - стандартная обработка
-                    try:
-                        file_kwargs = {
-                            'entity': self.target_entity,
-                            'file': message.media,
-                            'caption': text
-                        }
-                        
-                        if message.entities:
-                            file_kwargs['formatting_entities'] = message.entities
-                        sent_message = await self.client.send_file(**file_kwargs)
-                    except Exception as media_error:
-                        self.logger.warning(f"Не удалось отправить медиа {type(message.media)}: {media_error}")
-                        # Отправляем только текст
+                try:
+                    if isinstance(message.media, MessageMediaWebPage):
+                        # Для веб-страниц отправляем только текст с entities
                         sent_message = await self.client.send_message(**send_kwargs)
+                    else:
+                        # Для всех других типов медиа - скачиваем и загружаем заново
+                        self.logger.debug(f"Скачиваем медиа из сообщения {message.id}")
+                        
+                        # Скачиваем медиа файл в память
+                        file_bytes = await self.client.download_media(message.media, file=bytes)
+                        
+                        if file_bytes:
+                            self.logger.debug(f"Успешно скачан файл: {len(file_bytes)} байт")
+                            
+                            # Определяем параметры для загрузки
+                            file_kwargs = {
+                                'entity': self.target_entity,
+                                'file': file_bytes,  # Используем скачанные байты
+                                'caption': text,
+                            }
+                            
+                            # Для документов сохраняем принудительный режим документа
+                            if isinstance(message.media, MessageMediaDocument):
+                                file_kwargs['force_document'] = True
+                            elif isinstance(message.media, MessageMediaPhoto):
+                                file_kwargs['force_document'] = False
+                            
+                            if message.entities:
+                                file_kwargs['formatting_entities'] = message.entities
+                                
+                            sent_message = await self.client.send_file(**file_kwargs)
+                        else:
+                            # Если не удалось скачать медиа, отправляем только текст
+                            self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}, отправляем только текст")
+                            sent_message = await self.client.send_message(**send_kwargs)
+                            
+                except Exception as media_error:
+                    self.logger.warning(f"Ошибка обработки медиа из сообщения {message.id}: {media_error}")
+                    # Отправляем только текст в случае ошибки
+                    try:
+                        sent_message = await self.client.send_message(**send_kwargs)
+                    except Exception as text_error:
+                        self.logger.error(f"Ошибка отправки текста сообщения {message.id}: {text_error}")
+                        return False
             else:
                 # Отправляем текстовое сообщение с сохранением форматирования
                 sent_message = await self.client.send_message(**send_kwargs)

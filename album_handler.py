@@ -105,16 +105,30 @@ class AlbumHandler:
             # Сортируем сообщения по ID для правильного порядка
             album_messages.sort(key=lambda x: x.id)
             
-            # Подготавливаем медиа файлы для группировки
-            media_files = []
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа файлы для избежания ошибки "protected chat"
+            downloaded_files = []
             first_message = album_messages[0]
             
-            for message in album_messages:
+            for i, message in enumerate(album_messages):
                 if message.media:
-                    media_files.append(message.media)
+                    try:
+                        # Скачиваем медиа файл в память
+                        self.logger.debug(f"Скачиваем медиа файл {i+1}/{len(album_messages)} из сообщения {message.id}")
+                        
+                        file_bytes = await self.client.download_media(message.media, file=bytes)
+                        
+                        if file_bytes:
+                            downloaded_files.append(file_bytes)
+                            self.logger.debug(f"Успешно скачан файл {i+1}: {len(file_bytes)} байт")
+                        else:
+                            self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}")
+                            
+                    except Exception as download_error:
+                        self.logger.warning(f"Ошибка скачивания медиа из сообщения {message.id}: {download_error}")
+                        continue
             
-            if not media_files:
-                self.logger.warning("Альбом не содержит медиа файлов")
+            if not downloaded_files:
+                self.logger.warning("Альбом не содержит доступных медиа файлов")
                 # Если нет медиа, отправляем текст из первого сообщения
                 if first_message.message:
                     return await self.send_single_message(target_entity, first_message)
@@ -123,10 +137,10 @@ class AlbumHandler:
             # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
             caption, entities = self.extract_album_text(album_messages)
             
-            # Подготавливаем параметры отправки
+            # Подготавливаем параметры отправки со скачанными файлами
             send_kwargs = {
                 'entity': target_entity,
-                'file': media_files,
+                'file': downloaded_files,  # Используем скачанные байты
                 'caption': caption,
             }
             
@@ -139,9 +153,9 @@ class AlbumHandler:
             
             # Логируем результат
             if isinstance(sent_messages, list):
-                self.logger.info(f"Альбом из {len(media_files)} элементов успешно отправлен как {len(sent_messages)} сообщений")
+                self.logger.info(f"Альбом из {len(downloaded_files)} элементов успешно отправлен как {len(sent_messages)} сообщений")
             else:
-                self.logger.info(f"Альбом из {len(media_files)} элементов успешно отправлен")
+                self.logger.info(f"Альбом из {len(downloaded_files)} элементов успешно отправлен")
             
             return True
             
@@ -164,21 +178,55 @@ class AlbumHandler:
             text = message.message or ""
             
             if message.media:
-                # Отправляем медиа с подписью
-                file_kwargs = {
-                    'entity': target_entity,
-                    'file': message.media,
-                    'caption': text
-                }
-                
-                if message.entities:
-                    file_kwargs['formatting_entities'] = message.entities
-                
-                # Определяем тип медиа для правильной отправки
-                if isinstance(message.media, MessageMediaDocument):
-                    file_kwargs['force_document'] = True
-                
-                await self.client.send_file(**file_kwargs)
+                try:
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа для избежания ошибки "protected chat"
+                    self.logger.debug(f"Скачиваем медиа из сообщения {message.id}")
+                    
+                    file_bytes = await self.client.download_media(message.media, file=bytes)
+                    
+                    if file_bytes:
+                        # Отправляем скачанный медиа файл с подписью
+                        file_kwargs = {
+                            'entity': target_entity,
+                            'file': file_bytes,  # Используем скачанные байты
+                            'caption': text
+                        }
+                        
+                        if message.entities:
+                            file_kwargs['formatting_entities'] = message.entities
+                        
+                        # Определяем тип медиа для правильной отправки
+                        if isinstance(message.media, MessageMediaDocument):
+                            file_kwargs['force_document'] = True
+                        
+                        await self.client.send_file(**file_kwargs)
+                    else:
+                        # Если не удалось скачать медиа, отправляем только текст
+                        self.logger.warning(f"Не удалось скачать медиа из сообщения {message.id}, отправляем только текст")
+                        send_kwargs = {
+                            'entity': target_entity,
+                            'message': text,
+                            'link_preview': False
+                        }
+                        
+                        if message.entities:
+                            send_kwargs['formatting_entities'] = message.entities
+                        
+                        await self.client.send_message(**send_kwargs)
+                        
+                except Exception as media_error:
+                    self.logger.warning(f"Ошибка обработки медиа из сообщения {message.id}: {media_error}")
+                    # Отправляем только текст в случае ошибки
+                    send_kwargs = {
+                        'entity': target_entity,
+                        'message': text,
+                        'link_preview': False
+                    }
+                    
+                    if message.entities:
+                        send_kwargs['formatting_entities'] = message.entities
+                    
+                    await self.client.send_message(**send_kwargs)
             else:
                 # Отправляем текстовое сообщение
                 send_kwargs = {

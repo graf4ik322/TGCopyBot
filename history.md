@@ -2,6 +2,43 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.0] - 2025-01-27
+
+### Critical Bug Fix - Protected Chat Support
+- **CRITICAL FIX**: Resolved "You can't forward messages from a protected chat" error
+  - **Root Cause**: Code was attempting to forward media objects from protected chats, which Telegram prohibits
+  - **Error Details**: `You can't forward messages from a protected chat (caused by SendMultiMediaRequest)`
+  - **Solution**: Completely replaced forwarding with proper copying by downloading and re-uploading media
+  - **Impact**: Albums and media messages from protected chats now copy successfully
+  - **Technical Implementation**:
+    - Modified `copy_album()` method to download media files using `download_media(file=bytes)`
+    - Updated `copy_single_message()` to handle protected chat media by downloading first
+    - Fixed `AlbumHandler.send_album()` to use downloaded bytes instead of media objects
+    - Fixed `AlbumHandler.send_single_message()` to properly handle protected media
+    - All media copying now uses `file_bytes` instead of raw `message.media` objects
+
+### Architecture Changes
+- **Media Processing**: Fundamental change from object passing to download-upload pipeline
+  - **Before**: `send_file(file=message.media)` → causes forwarding attempt
+  - **After**: `download_media() → send_file(file=bytes)` → creates new media
+  - **Benefits**: Works with all chat types including protected chats
+  - **Fallback**: If download fails, gracefully falls back to text-only messages
+
+### Enhanced Error Handling
+- **Robust Fallback**: Enhanced error handling for media download failures
+  - Downloads that fail gracefully degrade to text-only messages
+  - Comprehensive logging for debugging media processing issues
+  - Improved user feedback for protected chat limitations
+
+### Code Quality Improvements
+- **Comprehensive Fix**: Updated all media handling paths consistently
+  - Album processing in `TelegramCopier`
+  - Single message processing in `TelegramCopier`
+  - Album handling in `AlbumHandler`
+  - Single message handling in `AlbumHandler`
+- **Detailed Logging**: Added debug logging for media download process
+- **Memory Efficiency**: Downloads to memory (bytes) for better performance
+
 ## [1.0.9] - 2025-08-26
 
 ### Mobile UX/UI Critical Fixes
