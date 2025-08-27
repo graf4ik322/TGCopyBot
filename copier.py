@@ -15,8 +15,10 @@ from telethon.tl.types import (
     MessageEntityHashtag, MessageEntityBold, MessageEntityItalic,
     MessageEntityCode, MessageEntityPre, MessageEntityStrike,
     MessageEntityUnderline, MessageEntitySpoiler, MessageEntityBlockquote,
-    ChannelParticipantAdmin, ChannelParticipantCreator, PeerChannel
+    ChannelParticipantAdmin, ChannelParticipantCreator, PeerChannel,
+    DocumentAttributeFilename
 )
+import io
 from telethon.errors import FloodWaitError, PeerFloodError, MediaInvalidError
 from telethon.tl import functions
 # from telethon.tl.functions.channels import GetParticipantRequest - убрано, используем get_permissions
@@ -1046,20 +1048,18 @@ class TelegramCopier:
             # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
             caption, entities = self.extract_album_text(album_messages)
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Подготавливаем файлы с правильными именами и типами
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Подготавливаем файлы как BytesIO объекты с атрибутами
             files_to_send = []
             for media_info in downloaded_files:
-                if media_info['is_photo']:
-                    # Для фотографий отправляем как изображения без force_document
-                    files_to_send.append((media_info['bytes'], media_info['filename']))
-                else:
-                    # Для документов сохраняем как документы
-                    files_to_send.append((media_info['bytes'], media_info['filename']))
+                # Создаем BytesIO объект из скачанных байтов
+                file_obj = io.BytesIO(media_info['bytes'])
+                file_obj.name = media_info['filename']  # Устанавливаем имя файла
+                files_to_send.append(file_obj)
             
-            # Подготавливаем параметры для отправки альбома с правильными именами файлов
+            # Подготавливаем параметры для отправки альбома с правильными файлами
             send_kwargs = {
                 'entity': self.target_entity,
-                'file': files_to_send,  # Используем (bytes, filename) кортежи
+                'file': files_to_send,  # Используем BytesIO объекты
                 'caption': caption,
             }
             
@@ -1078,7 +1078,7 @@ class TelegramCopier:
             for i, media_info in enumerate(downloaded_files):
                 self.logger.debug(f"  Файл {i+1}: {len(media_info['bytes'])} байт, имя: {media_info['filename']}, тип: {media_info['media_type']}")
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанные файлы с правильными именами
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанные файлы как BytesIO объекты
             sent_messages = await self.client.send_file(**send_kwargs)
             
             # Анализируем результат
@@ -1186,10 +1186,13 @@ class TelegramCopier:
                         if file_bytes:
                             self.logger.debug(f"Успешно скачан файл: {len(file_bytes)} байт, имя: {file_name}")
                             
-                            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Определяем параметры для загрузки с именем файла
+                            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем BytesIO объект с именем файла
+                            file_obj = io.BytesIO(file_bytes)
+                            file_obj.name = file_name
+                            
                             file_kwargs = {
                                 'entity': self.target_entity,
-                                'file': (file_bytes, file_name),  # Передаем кортеж (bytes, filename)
+                                'file': file_obj,  # Передаем BytesIO объект
                                 'caption': text,
                             }
                             

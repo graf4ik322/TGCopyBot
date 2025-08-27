@@ -7,6 +7,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from telethon.tl.types import Message, MessageMediaPhoto, MessageMediaDocument
 from telethon import TelegramClient
+import io
 
 
 class AlbumHandler:
@@ -149,15 +150,18 @@ class AlbumHandler:
             # ИСПРАВЛЕНО: Получаем текст из любого сообщения альбома
             caption, entities = self.extract_album_text(album_messages)
             
-            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Подготавливаем файлы с правильными именами и типами
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Подготавливаем файлы как BytesIO объекты
             files_to_send = []
             for media_info in downloaded_files:
-                files_to_send.append((media_info['bytes'], media_info['filename']))
+                # Создаем BytesIO объект из скачанных байтов
+                file_obj = io.BytesIO(media_info['bytes'])
+                file_obj.name = media_info['filename']  # Устанавливаем имя файла
+                files_to_send.append(file_obj)
             
             # Подготавливаем параметры отправки со скачанными файлами
             send_kwargs = {
                 'entity': target_entity,
-                'file': files_to_send,  # Используем (bytes, filename) кортежи
+                'file': files_to_send,  # Используем BytesIO объекты
                 'caption': caption,
             }
             
@@ -216,10 +220,13 @@ class AlbumHandler:
                     file_bytes = await self.client.download_media(message.media, file=bytes)
                     
                     if file_bytes:
-                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправляем скачанный медиа файл с именем и подписью
+                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем BytesIO объект с именем файла
+                        file_obj = io.BytesIO(file_bytes)
+                        file_obj.name = file_name
+                        
                         file_kwargs = {
                             'entity': target_entity,
-                            'file': (file_bytes, file_name),  # Передаем кортеж (bytes, filename)
+                            'file': file_obj,  # Передаем BytesIO объект
                             'caption': text
                         }
                         

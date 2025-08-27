@@ -2,6 +2,31 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.2] - 2025-01-27
+
+### Critical Telethon API Fix - TLObject Compatibility  
+- **CRITICAL FIX**: Resolved "a TLObject was expected but found something else" error
+  - **Root Cause**: Using `(bytes, filename)` tuples instead of proper Telethon API objects
+  - **Error Details**: `TLObject was expected but found something else`, `Failed to convert photo_1.jpg to media`
+  - **Solution**: Replaced tuple approach with proper `io.BytesIO` objects for Telethon API compatibility
+  - **Impact**: Albums and media now upload correctly without API errors
+  - **Technical Implementation**:
+    - Replaced `(bytes, filename)` tuples with `io.BytesIO` objects
+    - Set `file_obj.name` property to preserve filenames
+    - Updated all `send_file()` calls to use BytesIO objects instead of raw data
+    - Maintained media type detection and proper `force_document` logic
+    - Fixed both album and single message media processing
+
+### Enhanced Telethon API Compatibility
+- **BytesIO Integration**: Proper file-like objects for media upload
+  - **Before**: `file: (bytes, filename)` → causes TLObject errors
+  - **After**: `file: io.BytesIO(bytes); file.name = filename` → proper API usage
+  - **Benefits**: Full compatibility with Telethon's internal media processing
+- **API Standards Compliance**: All media operations now follow Telethon best practices
+  - Proper file-like objects with name attributes
+  - Correct handling of media metadata
+  - Seamless integration with Telegram's media upload system
+
 ## [1.1.1] - 2025-01-27
 
 ### Critical Media Type Fix - Photo and Album Display
