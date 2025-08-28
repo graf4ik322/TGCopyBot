@@ -46,6 +46,18 @@ class Config:
         # НОВОЕ: Настройка антивложенности
         self.flatten_structure = os.getenv('FLATTEN_STRUCTURE', 'false').lower() == 'true'
         
+        # Message deletion settings
+        self.deletion_batch_size: int = int(os.getenv('DELETION_BATCH_SIZE', '100'))
+        self.deletion_messages_per_hour: int = int(os.getenv('DELETION_MESSAGES_PER_HOUR', '6000'))
+        self.deletion_delay_seconds: int = int(os.getenv('DELETION_DELAY_SECONDS', '1'))
+        self.deletion_timeout_seconds: int = int(os.getenv('DELETION_TIMEOUT_SECONDS', '30'))
+        self.deletion_max_range_warning: int = int(os.getenv('DELETION_MAX_RANGE_WARNING', '50000'))
+        self.deletion_default_start_id: int = int(os.getenv('DELETION_DEFAULT_START_ID', '1'))
+        self.deletion_default_end_id: int = int(os.getenv('DELETION_DEFAULT_END_ID', '17870'))
+        self.deletion_target_group: str = os.getenv('DELETION_TARGET_GROUP', self.target_group_id)
+        self.deletion_require_confirmation: bool = os.getenv('DELETION_REQUIRE_CONFIRMATION', 'true').lower() == 'true'
+        self.deletion_auto_dry_run: bool = os.getenv('DELETION_AUTO_DRY_RUN', 'false').lower() == 'true'
+        
         # Proxy settings (optional)
         self.proxy_server: Optional[str] = os.getenv('PROXY_SERVER')
         # ИСПРАВЛЕНИЕ: Безопасное преобразование PROXY_PORT

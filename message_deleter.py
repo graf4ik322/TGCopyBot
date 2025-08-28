@@ -23,31 +23,35 @@ from utils import setup_logging, RateLimiter, handle_flood_wait
 class MessageDeleter:
     """Class for batch deletion of Telegram messages with proper rate limiting."""
     
-    def __init__(self, target_group_id: str, start_id: int, end_id: int, dry_run: bool = False):
+    def __init__(self, target_group_id: Optional[str] = None, start_id: Optional[int] = None, 
+                 end_id: Optional[int] = None, dry_run: Optional[bool] = None):
         """
         Initialize the message deleter.
         
         Args:
-            target_group_id: ID or username of the target group/channel
-            start_id: Starting message ID (inclusive)
-            end_id: Ending message ID (inclusive) 
-            dry_run: If True, only simulate deletion without actually deleting
+            target_group_id: ID or username of the target group/channel (uses .env if None)
+            start_id: Starting message ID (inclusive) (uses .env if None)
+            end_id: Ending message ID (inclusive) (uses .env if None)
+            dry_run: If True, only simulate deletion without actually deleting (uses .env if None)
         """
         self.config = Config()
         self.logger = setup_logging()
         self.client: Optional[TelegramClient] = None
-        self.target_group_id = target_group_id
-        self.start_id = start_id
-        self.end_id = end_id
-        self.dry_run = dry_run
+        
+        # Use config defaults if not provided
+        self.target_group_id = target_group_id or self.config.deletion_target_group
+        self.start_id = start_id or self.config.deletion_default_start_id
+        self.end_id = end_id or self.config.deletion_default_end_id
+        self.dry_run = dry_run if dry_run is not None else self.config.deletion_auto_dry_run
         self.running = False
         
-        # Rate limiter for deletion operations - optimized for batch deletion
-        # Since we delete 100 messages per batch, we can do ~60 batches per hour
-        # This equals 6000 messages per hour (100 messages/minute)
+        # Configurable batch size
+        self.batch_size = self.config.deletion_batch_size
+        
+        # Rate limiter with configurable settings
         self.rate_limiter = RateLimiter(
-            messages_per_hour=6000,  # 100 messages per minute = 6000 per hour
-            delay_seconds=1  # 1 second between batches (each batch = 100 messages)
+            messages_per_hour=self.config.deletion_messages_per_hour,
+            delay_seconds=self.config.deletion_delay_seconds
         )
         
         # Statistics
@@ -96,7 +100,7 @@ class MessageDeleter:
         """Authenticate with Telegram using existing session."""
         try:
             self.logger.info("Starting Telegram client...")
-            await asyncio.wait_for(self.client.start(), timeout=30.0)
+            await asyncio.wait_for(self.client.start(), timeout=self.config.deletion_timeout_seconds)
             
             # Check if we're authorized
             if await self.client.is_user_authorized():
@@ -116,7 +120,7 @@ class MessageDeleter:
                 return False
                 
         except asyncio.TimeoutError:
-            self.logger.error("Timeout starting client (30 sec). Possible session issue.")
+            self.logger.error(f"Timeout starting client ({self.config.deletion_timeout_seconds} sec). Possible session issue.")
             return False
         except Exception as e:
             self.logger.error(f"Error during authentication: {e}")
@@ -220,13 +224,12 @@ class MessageDeleter:
         self.running = True
         
         # Process messages in batches for maximum efficiency
-        batch_size = 100  # Telegram allows up to 100 messages per delete_messages call
         current_id = self.start_id
         
         try:
             while current_id <= self.end_id and self.running:
                 # Create batch of message IDs
-                batch_end = min(current_id + batch_size - 1, self.end_id)
+                batch_end = min(current_id + self.batch_size - 1, self.end_id)
                 batch_ids = list(range(current_id, batch_end + 1))
                 
                 self.logger.info(f"Processing batch: {current_id} to {batch_end} ({len(batch_ids)} messages)")
@@ -250,8 +253,8 @@ class MessageDeleter:
                 processed = batch_end - self.start_id + 1
                 progress = (processed / total_messages) * 100
                 remaining_messages = total_messages - processed
-                remaining_batches = (remaining_messages + batch_size - 1) // batch_size
-                estimated_time = remaining_batches * 1  # 1 second per batch
+                remaining_batches = (remaining_messages + self.batch_size - 1) // self.batch_size
+                estimated_time = remaining_batches * self.config.deletion_delay_seconds
                 
                 self.logger.info(f"Progress: {progress:.1f}% ({processed}/{total_messages}) | ~{estimated_time}s remaining")
                 
@@ -298,8 +301,10 @@ async def main():
         print("Error: end_id must be >= start_id")
         return False
     
-    if args.end_id - args.start_id > 50000:
-        print("Warning: Large deletion range. Consider smaller batches for safety.")
+    # Load config to get warning threshold
+    config = Config()
+    if args.end_id - args.start_id > config.deletion_max_range_warning:
+        print(f"Warning: Large deletion range ({args.end_id - args.start_id + 1} messages). Consider smaller batches for safety.")
         confirm = input("Continue? (y/N): ")
         if confirm.lower() != 'y':
             return False

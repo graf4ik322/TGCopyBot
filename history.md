@@ -688,3 +688,117 @@ The deletion module successfully addresses the requirement to clean up developme
 - Improved batch counting and statistics tracking
 
 This optimization makes the deletion process approximately 6x faster while maintaining full compliance with Telegram API limits.
+
+---
+
+## Version 2.2.0 - Full .env Configuration Support (2024-12-28)
+
+### Overview
+Complete refactoring of deletion scripts to support full configuration through .env file. All timing, batching, and behavior parameters are now configurable without code changes.
+
+### New Configuration Parameters
+
+#### Message Deletion Settings
+- **DELETION_TARGET_GROUP**: Target group for deletion operations (defaults to TARGET_GROUP_ID)
+- **DELETION_DEFAULT_START_ID**: Default starting message ID for deletion (default: 1)
+- **DELETION_DEFAULT_END_ID**: Default ending message ID for deletion (default: 17870)
+- **DELETION_BATCH_SIZE**: Messages per batch for deletion API calls (default: 100)
+- **DELETION_MESSAGES_PER_HOUR**: Maximum messages to delete per hour (default: 6000)
+- **DELETION_DELAY_SECONDS**: Delay between deletion batches in seconds (default: 1)
+- **DELETION_TIMEOUT_SECONDS**: Connection timeout for deletion operations (default: 30)
+- **DELETION_MAX_RANGE_WARNING**: Warning threshold for large deletion ranges (default: 50000)
+- **DELETION_REQUIRE_CONFIRMATION**: Require "DELETE" confirmation before proceeding (default: true)
+- **DELETION_AUTO_DRY_RUN**: Automatically run in dry-run mode (default: false)
+
+### Enhanced Features
+
+#### Flexible Script Usage
+- **Default Parameters**: All scripts now use .env defaults when parameters not specified
+- **Command Line Override**: Command line parameters still override .env settings
+- **Validation**: Comprehensive parameter validation with helpful error messages
+- **Configuration Templates**: Complete .env.template with all available options
+
+#### Safety Improvements
+- **Configurable Confirmations**: Can disable confirmation prompts for automated workflows
+- **Flexible Warnings**: Adjustable warning thresholds for large deletion ranges
+- **Auto Dry-Run**: Option to always run in simulation mode
+- **Timeout Configuration**: Configurable connection timeouts
+
+#### Performance Optimization
+- **Configurable Batching**: Batch size adjustable from 1 to 100 messages
+- **Flexible Rate Limiting**: Rate limits adjustable from conservative to maximum speed
+- **Custom Delays**: Delay between operations configurable from 0.1 to any number of seconds
+
+### Technical Implementation
+
+#### Config Class Extensions
+- Added 10 new deletion-specific configuration parameters
+- Backward compatibility with existing configuration
+- Type-safe parameter parsing with defaults
+- Environment variable fallback support
+
+#### Script Refactoring
+- **MessageDeleter Class**: Now accepts optional parameters with .env fallbacks
+- **cleanup_group.py**: Uses configuration for all timing and behavior settings
+- **Parameter Validation**: Enhanced validation with configuration-aware error messages
+- **Progress Reporting**: Dynamic progress calculation based on configured parameters
+
+### Configuration Examples
+
+#### Maximum Speed Setup
+```env
+DELETION_BATCH_SIZE=100
+DELETION_MESSAGES_PER_HOUR=6000
+DELETION_DELAY_SECONDS=1
+DELETION_REQUIRE_CONFIRMATION=false
+```
+
+#### Conservative Setup
+```env
+DELETION_BATCH_SIZE=50
+DELETION_MESSAGES_PER_HOUR=3000
+DELETION_DELAY_SECONDS=2
+DELETION_MAX_RANGE_WARNING=10000
+```
+
+#### Testing Setup
+```env
+DELETION_AUTO_DRY_RUN=true
+DELETION_REQUIRE_CONFIRMATION=false
+ADD_DEBUG_TAGS=true
+```
+
+### Documentation Updates
+- **CONFIGURATION.md**: Complete configuration guide with all parameters
+- **.env.template**: Comprehensive template with examples and explanations
+- **Parameter Reference**: Detailed description of all configurable options
+- **Performance Calculations**: Formulas for estimating operation time based on settings
+
+### Usage Examples
+
+#### Using .env defaults
+```bash
+# Uses all settings from .env file
+python3 cleanup_group.py
+```
+
+#### Command line override
+```bash
+# Overrides .env settings for specific operation
+python3 message_deleter.py @custom_group 1 5000 --dry-run
+```
+
+#### Environment variable override
+```bash
+export DELETION_BATCH_SIZE=50
+python3 cleanup_group.py
+```
+
+### Benefits
+- **Zero Code Changes**: All customization through configuration
+- **Flexible Deployment**: Different settings for dev/test/production
+- **Performance Tuning**: Easy optimization for different scenarios
+- **Safety Controls**: Configurable safety measures and confirmations
+- **Automation Ready**: Can disable interactive prompts for scripts
+
+This update makes the deletion module fully configurable and ready for production deployment with any required performance or safety settings.
