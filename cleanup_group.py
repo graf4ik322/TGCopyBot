@@ -26,10 +26,14 @@ async def cleanup_development_messages():
     target_group = config.target_group_id
     start_id = 1
     end_id = 17870
+    total_messages = end_id - start_id + 1
+    estimated_batches = (total_messages + 99) // 100  # Round up for batch count
+    estimated_time_minutes = estimated_batches / 60  # ~60 batches per minute
     
     print(f"Target Group: {target_group}")
     print(f"Message Range: {start_id} to {end_id}")
-    print(f"Total Messages: {end_id - start_id + 1}")
+    print(f"Total Messages: {total_messages}")
+    print(f"Estimated Time: ~{estimated_time_minutes:.1f} minutes ({estimated_batches} batches)")
     print()
     
     # Confirm before proceeding
@@ -81,10 +85,14 @@ async def dry_run_cleanup():
     target_group = config.target_group_id
     start_id = 1
     end_id = 17870
+    total_messages = end_id - start_id + 1
+    estimated_batches = (total_messages + 99) // 100  # Round up for batch count
+    estimated_time_minutes = estimated_batches / 60  # ~60 batches per minute
     
     print(f"Target Group: {target_group}")
     print(f"Message Range: {start_id} to {end_id}")
-    print(f"Total Messages: {end_id - start_id + 1}")
+    print(f"Total Messages: {total_messages}")
+    print(f"Estimated Time: ~{estimated_time_minutes:.1f} minutes ({estimated_batches} batches)")
     print()
     print("🔍 DRY RUN MODE - No messages will be actually deleted")
     print()

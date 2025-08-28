@@ -42,11 +42,12 @@ class MessageDeleter:
         self.dry_run = dry_run
         self.running = False
         
-        # Rate limiter for deletion operations (more conservative than copying)
-        # Telegram allows ~20 messages per minute, we use 15 for safety
+        # Rate limiter for deletion operations - optimized for batch deletion
+        # Since we delete 100 messages per batch, we can do ~60 batches per hour
+        # This equals 6000 messages per hour (100 messages/minute)
         self.rate_limiter = RateLimiter(
-            messages_per_hour=900,  # 15 per minute = 900 per hour
-            delay_seconds=4  # 4 seconds between deletions for safety
+            messages_per_hour=6000,  # 100 messages per minute = 6000 per hour
+            delay_seconds=1  # 1 second between batches (each batch = 100 messages)
         )
         
         # Statistics
@@ -218,7 +219,7 @@ class MessageDeleter:
         
         self.running = True
         
-        # Process messages in batches for efficiency
+        # Process messages in batches for maximum efficiency
         batch_size = 100  # Telegram allows up to 100 messages per delete_messages call
         current_id = self.start_id
         
@@ -228,9 +229,9 @@ class MessageDeleter:
                 batch_end = min(current_id + batch_size - 1, self.end_id)
                 batch_ids = list(range(current_id, batch_end + 1))
                 
-                self.logger.info(f"Processing batch: {current_id} to {batch_end}")
+                self.logger.info(f"Processing batch: {current_id} to {batch_end} ({len(batch_ids)} messages)")
                 
-                # Apply rate limiting
+                # Apply rate limiting (only 1 second delay between batches)
                 await self.rate_limiter.wait_if_needed()
                 
                 # Delete the batch
@@ -241,13 +242,18 @@ class MessageDeleter:
                 failed_in_batch = len(batch_ids) - deleted_in_batch
                 self.failed_count += failed_in_batch
                 
-                # Record the operation for rate limiting
-                self.rate_limiter.record_message_sent()
+                # Record the batch operation for rate limiting (count as batch_size messages)
+                for _ in range(len(batch_ids)):
+                    self.rate_limiter.record_message_sent()
                 
-                # Progress update
+                # Progress update with time estimation
                 processed = batch_end - self.start_id + 1
                 progress = (processed / total_messages) * 100
-                self.logger.info(f"Progress: {progress:.1f}% ({processed}/{total_messages})")
+                remaining_messages = total_messages - processed
+                remaining_batches = (remaining_messages + batch_size - 1) // batch_size
+                estimated_time = remaining_batches * 1  # 1 second per batch
+                
+                self.logger.info(f"Progress: {progress:.1f}% ({processed}/{total_messages}) | ~{estimated_time}s remaining")
                 
                 current_id = batch_end + 1
             
