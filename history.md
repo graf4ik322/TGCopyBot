@@ -2,6 +2,59 @@
 
 This file tracks all changes, fixes, and improvements made to the Telegram Posts Copier project.
 
+## [1.1.6] - 2025-01-27
+
+### CRITICAL MEDIA FIX: Expired File Reference Auto-Refresh
+- **CRITICAL BUG FIX**: Fixed massive media failures after long FloodWait due to expired file references
+  - **Root Cause**: After FloodWait delays, Telegram file references expire making media downloads fail
+  - **Problem**: Thousands of "file reference has expired" errors leading to complete media loss
+  - **User Impact**: All albums and media messages were skipped after FloodWait, only text was copied
+  - **Solution**: Implemented automatic file reference refresh by re-fetching messages from source
+
+### Technical Implementation Details
+- **New `refresh_expired_messages()` function**: Smart message refresh mechanism
+  - **Bulk Refresh**: Updates multiple messages at once using `get_messages()` with IDs list
+  - **Error Handling**: Graceful fallback to original messages if refresh fails
+  - **Logging**: Comprehensive logging of refresh process and results
+  - **Type Safety**: Handles both single messages and message lists
+- **Enhanced Album Processing**: Auto-refresh on expired references detected
+  - **Detection**: Monitors for "file reference has expired" errors during download
+  - **Smart Retry**: Refreshes entire album and retries download with fresh references
+  - **Partial Success**: Continues with successfully downloaded files if some fail
+  - **Progress Tracking**: Clear logging of refresh attempts and results
+- **Enhanced Single Message Processing**: Individual message refresh capability
+  - **Immediate Refresh**: Refreshes single message on first expired reference error
+  - **Seamless Integration**: Updates message object in-place for continued processing
+  - **Fallback Logic**: Gracefully handles refresh failures with clear error messages
+
+### File Reference Management
+- **Proactive Detection**: Identifies expired references before they cause failures
+- **Automatic Recovery**: Seamlessly refreshes expired references without user intervention
+- **Batch Processing**: Efficiently handles multiple expired references in albums
+- **Error Categorization**: Distinguishes between expired references and self-destructing media
+- **Retry Strategy**: Single retry with fresh reference, then graceful failure
+
+### Advanced Error Handling
+- **Expired Reference Recovery**: Attempts refresh before giving up on media
+- **Self-Destructing Media**: Still properly identifies and skips intentionally temporary media
+- **Network Failures**: Robust handling of refresh API call failures
+- **Partial Album Success**: Processes successfully refreshed files even if some fail
+- **Clear User Feedback**: Detailed logging explains what happened and why
+
+### Impact & Benefits
+- **✅ Zero Media Loss**: Media files are no longer lost due to expired references after FloodWait
+- **✅ Automatic Recovery**: No manual intervention required - script handles refresh automatically
+- **✅ Batch Efficiency**: Refreshes entire albums at once for optimal performance
+- **✅ Graceful Degradation**: Falls back to text-only when media is truly unavailable
+- **✅ Improved Logging**: Clear visibility into refresh process and success/failure reasons
+- **✅ FloodWait Resilience**: Script now handles any length FloodWait without media loss
+
+### Performance Improvements
+- **Smart Refresh**: Only refreshes when expired references are detected
+- **Bulk Operations**: Refreshes multiple messages in single API call
+- **Minimal Overhead**: Refresh adds minimal processing time compared to download failures
+- **Efficient Retry**: Single refresh attempt per message/album prevents infinite loops
+
 ## [1.1.5] - 2025-01-27
 
 ### CRITICAL TYPE ERROR FIX: Album Resume After FloodWait

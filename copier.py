@@ -995,6 +995,46 @@ class TelegramCopier:
         self.logger.debug("Текст не найден ни в одном сообщении альбома")
         return "", None
 
+    async def refresh_expired_messages(self, messages: List[Message]) -> List[Message]:
+        """
+        НОВОЕ: Обновление сообщений с истекшими file reference.
+        Получает свежие копии сообщений из источника для обновления медиа ссылок.
+        
+        Args:
+            messages: Список сообщений с возможно истекшими file reference
+            
+        Returns:
+            Список обновленных сообщений со свежими file reference
+        """
+        try:
+            # Получаем ID всех сообщений
+            message_ids = [msg.id for msg in messages]
+            
+            self.logger.info(f"🔄 Обновляем {len(message_ids)} сообщений для получения свежих file reference")
+            self.logger.debug(f"   Обновляемые ID: {message_ids}")
+            
+            # Получаем свежие копии сообщений из источника
+            fresh_messages = await self.client.get_messages(self.source_entity, ids=message_ids)
+            
+            # Проверяем что получили все сообщения
+            if isinstance(fresh_messages, list):
+                if len(fresh_messages) == len(message_ids):
+                    self.logger.info(f"✅ Успешно обновлены все {len(fresh_messages)} сообщений")
+                    return fresh_messages
+                else:
+                    self.logger.warning(f"⚠️ Получено {len(fresh_messages)} из {len(message_ids)} сообщений")
+                    # Возвращаем что получили, лучше чем ничего
+                    return fresh_messages
+            else:
+                # Одно сообщение
+                self.logger.info("✅ Успешно обновлено 1 сообщение")
+                return [fresh_messages]
+                
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка обновления сообщений: {e}")
+            self.logger.warning("⚠️ Используем оригинальные сообщения (file reference могут быть устаревшими)")
+            return messages
+    
     async def copy_album(self, album_messages: List[Message]) -> bool:
         """
         Копирование альбома сообщений как единого целое.
@@ -1032,8 +1072,9 @@ class TelegramCopier:
             
             # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Скачиваем медиа файлы вместо пересылки объектов
             # Это решает проблему "You can't forward messages from a protected chat"
-            # УЛУЧШЕНИЕ: Сохраняем информацию о типе медиа и имени файла
+            # НОВОЕ: Добавлена обработка истекших file reference с обновлением сообщений
             downloaded_files = []
+            expired_messages_detected = False
             
             for i, message in enumerate(album_messages):
                 if message.media:
@@ -1066,11 +1107,57 @@ class TelegramCopier:
                         # Обработка специфичных ошибок скачивания
                         if "file reference has expired" in str(download_error):
                             self.logger.warning(f"📅 Файл ссылка истекла для сообщения ID:{message.id} - файл устарел или самоуничтожающийся")
+                            expired_messages_detected = True
                         elif "self-destructing media" in str(download_error):
                             self.logger.warning(f"💥 Самоуничтожающееся медиа в сообщении ID:{message.id} - нельзя переслать")
                         else:
                             self.logger.warning(f"❌ Ошибка скачивания медиа из сообщения ID:{message.id}: {download_error}")
                         continue
+            
+            # НОВОЕ: Если обнаружены истекшие file reference, пытаемся обновить сообщения
+            if expired_messages_detected and not downloaded_files:
+                self.logger.warning("🔄 Обнаружены истекшие file reference, пытаемся обновить альбом...")
+                
+                try:
+                    # Обновляем сообщения альбома
+                    refreshed_messages = await self.refresh_expired_messages(album_messages)
+                    
+                    # Повторная попытка скачивания с обновленными сообщениями
+                    for i, message in enumerate(refreshed_messages):
+                        if message.media:
+                            try:
+                                self.logger.debug(f"🔄 Повторно скачиваем медиа файл {i+1}/{len(refreshed_messages)} из обновленного сообщения ID:{message.id}")
+                                
+                                file_name = self._get_media_filename(message.media, i)
+                                file_bytes = await self.client.download_media(message.media, file=bytes)
+                                
+                                if file_bytes:
+                                    media_info = {
+                                        'bytes': file_bytes,
+                                        'filename': file_name,
+                                        'media_type': type(message.media).__name__,
+                                        'is_photo': isinstance(message.media, MessageMediaPhoto),
+                                        'original_media': message.media,
+                                        'message_id': message.id
+                                    }
+                                    downloaded_files.append(media_info)
+                                    self.logger.info(f"✅ Успешно скачан обновленный файл {i+1}: {len(file_bytes)} байт, имя: {file_name} (ID:{message.id})")
+                                    
+                            except Exception as retry_error:
+                                if "file reference has expired" in str(retry_error):
+                                    self.logger.error(f"❌ Даже после обновления file reference истек для ID:{message.id}")
+                                else:
+                                    self.logger.error(f"❌ Ошибка повторного скачивания ID:{message.id}: {retry_error}")
+                                continue
+                    
+                    if downloaded_files:
+                        self.logger.info(f"✅ После обновления удалось скачать {len(downloaded_files)} файлов из альбома")
+                    else:
+                        self.logger.warning("❌ Даже после обновления не удалось скачать медиа файлы альбома")
+                        
+                except Exception as refresh_error:
+                    self.logger.error(f"❌ Ошибка обновления альбома: {refresh_error}")
+                    self.logger.warning("⚠️ Продолжаем с оригинальными сообщениями")
             
             # Проверяем результат скачивания
             if not downloaded_files:
@@ -1254,8 +1341,38 @@ class TelegramCopier:
                             file_bytes = await self.client.download_media(message.media, file=bytes)
                         except Exception as download_error:
                             if "file reference has expired" in str(download_error):
-                                self.logger.warning(f"📅 Файл ссылка истекла для сообщения ID:{message.id} - пропускаем")
-                                return False
+                                self.logger.warning(f"📅 Файл ссылка истекла для сообщения ID:{message.id} - пытаемся обновить")
+                                
+                                # НОВОЕ: Пытаемся обновить сообщение для получения свежего file reference
+                                try:
+                                    self.logger.info(f"🔄 Обновляем сообщение ID:{message.id} для получения свежего file reference")
+                                    refreshed_messages = await self.refresh_expired_messages([message])
+                                    
+                                    if refreshed_messages and len(refreshed_messages) > 0:
+                                        refreshed_message = refreshed_messages[0]
+                                        if refreshed_message.media:
+                                            self.logger.debug(f"🔄 Повторно скачиваем медиа из обновленного сообщения ID:{refreshed_message.id}")
+                                            file_bytes = await self.client.download_media(refreshed_message.media, file=bytes)
+                                            
+                                            if file_bytes:
+                                                self.logger.info(f"✅ Успешно скачан медиа после обновления file reference для ID:{message.id}")
+                                                # Обновляем message для дальнейшего использования
+                                                message = refreshed_message
+                                            else:
+                                                self.logger.warning(f"❌ Не удалось скачать медиа даже после обновления для ID:{message.id}")
+                                                return False
+                                        else:
+                                            self.logger.warning(f"❌ Обновленное сообщение ID:{message.id} не содержит медиа")
+                                            return False
+                                    else:
+                                        self.logger.error(f"❌ Не удалось получить обновленное сообщение ID:{message.id}")
+                                        return False
+                                        
+                                except Exception as refresh_error:
+                                    self.logger.error(f"❌ Ошибка обновления сообщения ID:{message.id}: {refresh_error}")
+                                    self.logger.warning(f"📅 Пропускаем сообщение ID:{message.id} - file reference истек и не удалось обновить")
+                                    return False
+                                    
                             elif "self-destructing media" in str(download_error):
                                 self.logger.warning(f"💥 Самоуничтожающееся медиа в сообщении ID:{message.id} - пропускаем")
                                 return False
