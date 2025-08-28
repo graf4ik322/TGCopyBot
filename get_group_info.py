@@ -42,23 +42,30 @@ async def get_group_info():
         print("\n📋 Available Groups and Channels:")
         print("=" * 60)
         
+        found_groups = 0
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
             
             # Only show groups and channels
             if isinstance(entity, (Channel, Chat)):
+                found_groups += 1
                 group_type = "Channel" if isinstance(entity, Channel) and entity.broadcast else "Group"
+                privacy = "Private" if hasattr(entity, 'access_hash') and entity.access_hash else "Public"
                 
-                print(f"\n📁 {group_type}: {entity.title}")
+                print(f"\n📁 {group_type} ({privacy}): {entity.title}")
                 print(f"   ID: {entity.id}")
                 print(f"   Username: @{entity.username}" if entity.username else "   Username: None")
                 
-                # Show different ID formats
+                # Show different ID formats for testing
+                print(f"   For .env file: {entity.id}")
                 if entity.id < 0:
-                    print(f"   Alternative ID: {entity.id}")
+                    print(f"   Alternative: {entity.id}")
                 else:
-                    print(f"   Alternative ID: -{entity.id}")
-                    print(f"   Full ID: -100{entity.id}")
+                    print(f"   Alternative: -{entity.id}")
+                
+                # Show if it's private
+                if not entity.username:
+                    print("   🔒 Private group - use numeric ID")
                 
                 # Check permissions
                 try:
@@ -69,8 +76,11 @@ async def get_group_info():
                         print("   ✅ Delete permissions - can delete messages")
                     else:
                         print("   ⚠️  No delete permissions - can only delete own messages")
-                except:
-                    print("   ❓ Could not check permissions")
+                except Exception as e:
+                    print(f"   ❓ Could not check permissions: {e}")
+        
+        if found_groups == 0:
+            print("❌ No groups or channels found. Make sure you're a member of some groups.")
         
         # If user provided a specific group ID to check
         if len(sys.argv) > 1:

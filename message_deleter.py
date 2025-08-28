@@ -131,41 +131,86 @@ class MessageDeleter:
         try:
             self.logger.info(f"Validating access to group: {self.target_group_id}")
             
-            # Try different ways to get the entity
             target_entity = None
-            group_id_variants = [self.target_group_id]
             
-            # If it's a numeric ID, try different formats
+            # For private groups, we need to search through dialogs first
+            self.logger.info("Loading dialogs to find private groups...")
+            
+            # Convert target ID to different formats for comparison
+            target_id_variants = set()
             if str(self.target_group_id).lstrip('-').isdigit():
                 numeric_id = int(self.target_group_id)
-                group_id_variants.extend([
-                    numeric_id,
-                    f"-100{abs(numeric_id)}" if numeric_id > 0 else str(numeric_id),
-                    abs(numeric_id) if numeric_id < 0 else f"-{numeric_id}"
-                ])
+                target_id_variants.add(numeric_id)
+                target_id_variants.add(str(numeric_id))
+                # Add supergroup format variants
+                if numeric_id < 0:
+                    target_id_variants.add(abs(numeric_id))
+                    target_id_variants.add(str(abs(numeric_id)))
+            else:
+                target_id_variants.add(self.target_group_id)
             
-            last_error = None
-            for variant in group_id_variants:
-                try:
-                    self.logger.info(f"Trying to access group with ID: {variant}")
-                    target_entity = await self.client.get_entity(variant)
-                    self.target_group_id = variant  # Update with working variant
+            # Search through dialogs first (works for private groups)
+            async for dialog in self.client.iter_dialogs():
+                entity = dialog.entity
+                
+                # Check if this entity matches our target
+                entity_matches = False
+                
+                # Check by ID
+                if str(entity.id) in target_id_variants or entity.id in target_id_variants:
+                    entity_matches = True
+                
+                # Check by username (if target is @username format)
+                if hasattr(entity, 'username') and entity.username:
+                    if self.target_group_id == f"@{entity.username}" or self.target_group_id == entity.username:
+                        entity_matches = True
+                
+                if entity_matches:
+                    target_entity = entity
+                    self.logger.info(f"✅ Found group in dialogs: {entity.title}")
+                    # Update target_group_id to the entity for future operations
+                    self.target_group_id = entity
                     break
-                except Exception as e:
-                    last_error = e
-                    self.logger.debug(f"Failed to access group with variant {variant}: {e}")
-                    continue
+            
+            # If not found in dialogs, try direct entity lookup
+            if target_entity is None:
+                self.logger.info("Group not found in dialogs, trying direct entity lookup...")
+                
+                group_id_variants = [self.target_group_id]
+                
+                # If it's a numeric ID, try different formats
+                if str(self.target_group_id).lstrip('-').isdigit():
+                    numeric_id = int(self.target_group_id)
+                    group_id_variants.extend([
+                        numeric_id,
+                        f"-100{abs(numeric_id)}" if numeric_id > 0 else str(numeric_id),
+                        abs(numeric_id) if numeric_id < 0 else f"-{numeric_id}"
+                    ])
+                
+                last_error = None
+                for variant in group_id_variants:
+                    try:
+                        self.logger.debug(f"Trying to access group with ID: {variant}")
+                        target_entity = await self.client.get_entity(variant)
+                        self.target_group_id = variant  # Update with working variant
+                        self.logger.info(f"✅ Found group via direct lookup: {target_entity.title}")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        self.logger.debug(f"Failed to access group with variant {variant}: {e}")
+                        continue
             
             if target_entity is None:
-                self.logger.error(f"Cannot access group with any ID variant. Last error: {last_error}")
-                self.logger.error("Please check:")
-                self.logger.error("1. Group ID is correct")
-                self.logger.error("2. Bot is a member of the group")
-                self.logger.error("3. Group exists and is accessible")
-                self.logger.error("4. Try using @username instead of numeric ID")
+                self.logger.error("❌ Cannot access the target group.")
+                self.logger.error("Possible reasons:")
+                self.logger.error("1. Group ID is incorrect")
+                self.logger.error("2. Account is not a member of the group")
+                self.logger.error("3. Group is private and not accessible")
+                self.logger.error("4. Group doesn't exist")
+                self.logger.info("💡 Try running: python3 get_group_info.py")
                 return False
                 
-            self.logger.info(f"✅ Found group: {target_entity.title}")
+            self.logger.info(f"✅ Successfully accessed group: {target_entity.title}")
             
             # Check if we have admin permissions (required for deleting messages)
             try:
@@ -175,10 +220,11 @@ class MessageDeleter:
                     return True
                 else:
                     self.logger.warning("⚠️ No admin permissions detected - may only be able to delete own messages")
-                    # Don't return False here, let the actual deletion attempt determine what we can delete
+                    self.logger.info("ℹ️ Proceeding anyway - will attempt to delete available messages")
                     return True
             except Exception as e:
                 self.logger.warning(f"Could not verify permissions: {e}")
+                self.logger.info("ℹ️ Proceeding anyway - will attempt deletion")
                 return True  # Proceed anyway, let deletion attempts determine what's possible
                 
         except Exception as e:
@@ -201,6 +247,7 @@ class MessageDeleter:
         
         try:
             # Use delete_messages for batch deletion (more efficient)
+            # target_group_id might be an entity object now (for private groups)
             deleted_messages = await self.client.delete_messages(
                 self.target_group_id, 
                 message_ids
