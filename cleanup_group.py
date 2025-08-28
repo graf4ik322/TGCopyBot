@@ -122,6 +122,12 @@ async def dry_run_cleanup():
         print("✅ Dry run completed. Run the actual cleanup when ready.")
     else:
         print("❌ Dry run failed. Check configuration and permissions.")
+        print("\n🔧 Troubleshooting steps:")
+        print("1. Run: python3 get_group_info.py")
+        print("2. Check if your bot is a member of the target group")
+        print("3. Verify the group ID in your .env file")
+        print("4. Try using @username instead of numeric ID")
+        print(f"   Current target: {config.deletion_target_group}")
     
     return success
 

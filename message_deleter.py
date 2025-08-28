@@ -131,9 +131,41 @@ class MessageDeleter:
         try:
             self.logger.info(f"Validating access to group: {self.target_group_id}")
             
-            # Get group entity
-            target_entity = await self.client.get_entity(self.target_group_id)
-            self.logger.info(f"Found group: {target_entity.title}")
+            # Try different ways to get the entity
+            target_entity = None
+            group_id_variants = [self.target_group_id]
+            
+            # If it's a numeric ID, try different formats
+            if str(self.target_group_id).lstrip('-').isdigit():
+                numeric_id = int(self.target_group_id)
+                group_id_variants.extend([
+                    numeric_id,
+                    f"-100{abs(numeric_id)}" if numeric_id > 0 else str(numeric_id),
+                    abs(numeric_id) if numeric_id < 0 else f"-{numeric_id}"
+                ])
+            
+            last_error = None
+            for variant in group_id_variants:
+                try:
+                    self.logger.info(f"Trying to access group with ID: {variant}")
+                    target_entity = await self.client.get_entity(variant)
+                    self.target_group_id = variant  # Update with working variant
+                    break
+                except Exception as e:
+                    last_error = e
+                    self.logger.debug(f"Failed to access group with variant {variant}: {e}")
+                    continue
+            
+            if target_entity is None:
+                self.logger.error(f"Cannot access group with any ID variant. Last error: {last_error}")
+                self.logger.error("Please check:")
+                self.logger.error("1. Group ID is correct")
+                self.logger.error("2. Bot is a member of the group")
+                self.logger.error("3. Group exists and is accessible")
+                self.logger.error("4. Try using @username instead of numeric ID")
+                return False
+                
+            self.logger.info(f"✅ Found group: {target_entity.title}")
             
             # Check if we have admin permissions (required for deleting messages)
             try:
