@@ -35,7 +35,7 @@ class MessageDeleter:
             dry_run: If True, only simulate deletion without actually deleting (uses .env if None)
         """
         self.config = Config()
-        self.logger = setup_logging()
+        self.logger = setup_logging(self.config.log_level)
         self.client: Optional[TelegramClient] = None
         
         # Use config defaults if not provided

@@ -23,7 +23,7 @@ class TelegramCopierApp:
     def __init__(self):
         """Инициализация приложения."""
         self.config = Config()
-        self.logger = setup_logging()
+        self.logger = setup_logging(self.config.log_level)
         self.client: Optional[TelegramClient] = None
         self.copier: Optional[TelegramCopier] = None
         self.running = False

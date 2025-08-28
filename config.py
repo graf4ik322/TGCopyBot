@@ -46,6 +46,9 @@ class Config:
         # НОВОЕ: Настройка антивложенности
         self.flatten_structure = os.getenv('FLATTEN_STRUCTURE', 'false').lower() == 'true'
         
+        # Logging settings
+        self.log_level: str = os.getenv('LOG_LEVEL', 'INFO').upper()
+        
         # Message deletion settings
         self.deletion_batch_size: int = int(os.getenv('DELETION_BATCH_SIZE', '100'))
         self.deletion_messages_per_hour: int = int(os.getenv('DELETION_MESSAGES_PER_HOUR', '6000'))
