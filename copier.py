@@ -1183,6 +1183,7 @@ class TelegramCopier:
                 # Создаем BytesIO объект из скачанных байтов
                 file_obj = io.BytesIO(media_info['bytes'])
                 file_obj.name = media_info['filename']  # Устанавливаем имя файла
+                file_obj.seek(0)  # ИСПРАВЛЕНИЕ: Убеждаемся что указатель в начале файла
                 files_to_send.append(file_obj)
             
             # Подготавливаем параметры для отправки альбома с правильными файлами
@@ -1242,6 +1243,23 @@ class TelegramCopier:
                         self.logger, 
                         f"Album {album_ids[0]}-{album_ids[-1]}"
                     )
+                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Пересоздаем BytesIO объекты после FloodWait
+                    # Длительное ожидание может повредить файловые объекты
+                    self.logger.info(f"🔄 Пересоздаем BytesIO объекты после FloodWait для альбома {album_ids}")
+                    
+                    files_to_send = []
+                    for media_info in downloaded_files:
+                        # Создаем НОВЫЙ BytesIO объект из сохраненных байтов
+                        file_obj = io.BytesIO(media_info['bytes'])
+                        file_obj.name = media_info['filename']
+                        # Убеждаемся что указатель в начале файла
+                        file_obj.seek(0)
+                        files_to_send.append(file_obj)
+                    
+                    # Обновляем параметры отправки с новыми файловыми объектами
+                    send_kwargs['file'] = files_to_send
+                    self.logger.debug(f"✅ Пересозданы {len(files_to_send)} BytesIO объектов для повторной отправки")
+                    
                     # Продолжаем попытку - FloodWait завершен
                     
                     if retry_count >= max_retries:
@@ -1385,6 +1403,7 @@ class TelegramCopier:
                             # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Создаем BytesIO объект с именем файла
                             file_obj = io.BytesIO(file_bytes)
                             file_obj.name = file_name
+                            file_obj.seek(0)  # ИСПРАВЛЕНИЕ: Убеждаемся что указатель в начале файла
                             
                             file_kwargs = {
                                 'entity': self.target_entity,
@@ -1414,6 +1433,21 @@ class TelegramCopier:
                                 except FloodWaitError as flood_error:
                                     retry_count += 1
                                     await handle_media_flood_wait(flood_error, self.logger, message.id)
+                                    
+                                    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Пересоздаем BytesIO объект после FloodWait
+                                    # Длительное ожидание может повредить файловый объект
+                                    self.logger.info(f"🔄 Пересоздаем BytesIO объект после FloodWait для сообщения ID:{message.id}")
+                                    
+                                    # Создаем НОВЫЙ BytesIO объект из сохраненных байтов
+                                    file_obj = io.BytesIO(file_bytes)
+                                    file_obj.name = file_name
+                                    # Убеждаемся что указатель в начале файла
+                                    file_obj.seek(0)
+                                    
+                                    # Обновляем параметры отправки с новым файловым объектом
+                                    file_kwargs['file'] = file_obj
+                                    self.logger.debug(f"✅ Пересоздан BytesIO объект для повторной отправки сообщения ID:{message.id}")
+                                    
                                     # Продолжаем попытку - FloodWait завершен
                                     
                                     if retry_count >= max_retries:
